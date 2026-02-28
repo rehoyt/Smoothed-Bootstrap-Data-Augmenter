@@ -1,0 +1,5 @@
+{
+  "name": "Smoothed Bootstrap Data Augmenter",
+  "description": "An application to augment medical datasets using bootstrapping and adaptive Gaussian noise. It provides a comprehensive statistical report comparing the original and augmented data, including descriptive statistics, KS test, Mann-Whitney test, t-test, and chi-square testing.",
+  "requestFramePermissions": []
+}
