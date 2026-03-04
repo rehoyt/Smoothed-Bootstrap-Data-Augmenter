@@ -208,7 +208,17 @@ const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, on
         <div className={isDataLoaded ? '' : 'opacity-40 pointer-events-none'}>
             <h3 className="text-xl font-semibold mb-4">2. Configure</h3>
             <label className="block text-sm mb-1">Target Size</label>
-            <input type="number" value={targetSize} onChange={e => onTargetSizeChange(Number(e.target.value))} className="w-full border rounded p-2 focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+            <select 
+                value={targetSize} 
+                onChange={e => onTargetSizeChange(Number(e.target.value))} 
+                className="w-full border rounded p-2 focus:ring-2 focus:ring-blue-500 outline-none transition-all bg-white"
+            >
+                <option value={1000}>1000</option>
+                <option value={2000}>2000</option>
+                <option value={3000}>3000</option>
+                <option value={4000}>4000</option>
+                <option value={5000}>5000</option>
+            </select>
         </div>
         <div className="flex flex-col gap-2">
             <button onClick={onAugment} disabled={!isDataLoaded || isLoading} className="w-full py-3 bg-blue-600 text-white rounded-lg font-bold hover:bg-blue-700 disabled:bg-gray-400 shadow-md transition-all active:scale-[0.98]">
