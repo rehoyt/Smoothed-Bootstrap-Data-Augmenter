@@ -11,12 +11,14 @@
   },
   "dependencies": {
     "@google/genai": "latest",
+    "@tailwindcss/vite": "^4.2.1",
     "jstat": "^1.9.6",
     "lucide-react": "^0.577.0",
     "motion": "^12.37.0",
     "papaparse": "5.4.1",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
