@@ -102,7 +102,10 @@ const calculateKSTest = (arr1: number[], arr2: number[]): { D: number; p: number
     return { D: maxDiff, p: Math.min(isNaN(p) ? 1 : p, 1) };
 };
 
-const getDetailedColumnMetadata = (data: CsvData): Record<string, ColumnMetadata> => {
+export const getDetailedColumnMetadata = (
+    data: CsvData,
+    customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+): Record<string, ColumnMetadata> => {
   if (data.length === 0) return {};
   const metadata: Record<string, ColumnMetadata> = {};
   const headers = Object.keys(data[0]);
@@ -114,20 +117,32 @@ const getDetailedColumnMetadata = (data: CsvData): Record<string, ColumnMetadata
     
     let isNumericType = values.length > 0;
     for (let i = 0; i < Math.min(values.length, 50); i++) {
-        if (typeof values[i] !== 'number') {
+        const val = values[i];
+        if (val === null || val === undefined || isNaN(Number(String(val).trim()))) {
             isNumericType = false;
             break;
         }
     }
 
     const precision = isNumericType ? getPrecision(values) : 0;
-    const isHeuristicCategorical = isNumericType && uniqueCount <= CARDINALITY_THRESHOLD;
-    const type = (isNumericType && !isHeuristicCategorical) ? 'numerical' : 'categorical';
+    
+    let type: 'numerical' | 'categorical' | 'ordinal';
+    if (customColumnTypes && customColumnTypes[header]) {
+        type = customColumnTypes[header];
+    } else {
+        if (!isNumericType) {
+            type = 'categorical';
+        } else if (uniqueCount <= CARDINALITY_THRESHOLD) {
+            type = 'categorical';
+        } else {
+            type = 'numerical';
+        }
+    }
 
     metadata[header] = {
         type,
         uniqueCount,
-        isHeuristicCategorical,
+        isHeuristicCategorical: isNumericType && (type === 'categorical' || type === 'ordinal'),
         precision
     };
   }
@@ -137,8 +152,8 @@ const getDetailedColumnMetadata = (data: CsvData): Record<string, ColumnMetadata
 const getDescriptiveStats = (originalData: CsvData, augmentedData: CsvData, columns: string[]): DescriptiveStatReport[] => {
     const reports: DescriptiveStatReport[] = [];
     for (const col of columns) {
-        const originalValues = originalData.map(row => row[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
-        const augmentedValues = augmentedData.map(row => row[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
+        const originalValues = originalData.map(row => Number(row[col])).filter(v => typeof v === 'number' && !isNaN(v));
+        const augmentedValues = augmentedData.map(row => Number(row[col])).filter(v => typeof v === 'number' && !isNaN(v));
         if (originalValues.length < 2 || augmentedValues.length < 2) continue;
 
         const originalStats: Stats = {
@@ -178,17 +193,21 @@ const getDescriptiveStats = (originalData: CsvData, augmentedData: CsvData, colu
     return reports;
 };
 
-export const generateReport = (originalData: CsvData, augmentedData: CsvData): Report => {
-  const columnMetadata = getDetailedColumnMetadata(originalData);
+export const generateReport = (
+    originalData: CsvData, 
+    augmentedData: CsvData,
+    customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+): Report => {
+  const columnMetadata = getDetailedColumnMetadata(originalData, customColumnTypes);
   const headers = Object.keys(columnMetadata);
   const numericalColumns = headers.filter(k => columnMetadata[k].type === 'numerical');
-  const categoricalColumns = headers.filter(k => columnMetadata[k].type === 'categorical');
+  const categoricalColumns = headers.filter(k => columnMetadata[k].type === 'categorical' || columnMetadata[k].type === 'ordinal');
 
   const descriptiveStats = getDescriptiveStats(originalData, augmentedData, numericalColumns);
   
   const tTest = numericalColumns.map(col => {
-      const orig = originalData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
+      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
+      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
       if (orig.length < 2 || aug.length < 1) return { column: col, statistic: 0, pValue: 1, isSimilar: true };
       
       const augMean = jStat.mean(aug);
@@ -205,8 +224,8 @@ export const generateReport = (originalData: CsvData, augmentedData: CsvData): R
   });
 
   const mannWhitney = numericalColumns.map(col => {
-      const orig = originalData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
+      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
+      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
       const res = calculateMannWhitneyU(orig, aug);
       return { 
           column: col, 
@@ -218,8 +237,8 @@ export const generateReport = (originalData: CsvData, augmentedData: CsvData): R
   });
 
   const ksTest = numericalColumns.map(col => {
-      const orig = originalData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => r[col] as number).filter(v => typeof v === 'number' && !isNaN(v));
+      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
+      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
       const res = calculateKSTest(orig, aug);
       return { 
           column: col, 
@@ -265,7 +284,7 @@ export const generateReport = (originalData: CsvData, augmentedData: CsvData): R
     return { column: col, value: val, isSimilar: val < TVD_THRESHOLD };
   });
 
-  const colTypes: Record<string, 'numerical' | 'categorical'> = {};
+  const colTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
   headers.forEach(h => colTypes[h] = columnMetadata[h].type);
 
   return {
@@ -293,29 +312,41 @@ export const generateStatsSummaryCsv = (report: Report): string => {
     allCols.forEach(col => {
         const meta = report.columnMetadata[col];
         const type = meta.type;
-        const row: any = { Variable: col, Type: type, UniqueValues: meta.uniqueCount, Heuristic: meta.isHeuristicCategorical ? 'Categorical' : 'Standard' };
+        const row: any = { 
+            Variable: col, 
+            Type: type, 
+            UniqueValues: meta.uniqueCount, 
+            Heuristic: meta.isHeuristicCategorical ? 'Discrete' : 'Standard' 
+        };
 
-        if (type === 'numerical') {
-            const desc = report.descriptiveStats.find(s => s.column === col);
-            const tt = report.tTest.find(s => s.column === col);
-            const mw = report.mannWhitney.find(s => s.column === col);
-            const ks = report.ksTest.find(s => s.column === col);
+        const desc = report.descriptiveStats.find(s => s.column === col);
+        const tt = report.tTest.find(s => s.column === col);
+        const mw = report.mannWhitney.find(s => s.column === col);
+        const ks = report.ksTest.find(s => s.column === col);
+        const cs = report.chiSquare?.find(s => s.column === col);
+        const tvd = report.totalVariationDistance?.find(s => s.column === col);
 
-            row['T-Test P'] = tt?.pValue.toFixed(5) || 'N/A';
-            row['Mann-Whitney P'] = mw?.pValue.toFixed(5) || 'N/A';
-            row['KS-Test P'] = ks?.pValue.toFixed(5) || 'N/A';
-            row['Mean Difference'] = desc?.meanDifferenceCI.diff.toFixed(meta.precision) || 'N/A';
-            row['CI Lower'] = desc?.meanDifferenceCI.lower.toFixed(meta.precision) || 'N/A';
-            row['CI Upper'] = desc?.meanDifferenceCI.upper.toFixed(meta.precision) || 'N/A';
-            row['Is Similar'] = (tt?.isSimilar && mw?.isSimilar && ks?.isSimilar) ? 'YES' : 'NO';
-        } else {
-            const cs = report.chiSquare.find(s => s.column === col);
-            const tvd = report.totalVariationDistance.find(s => s.column === col);
-            row['Chi-Square P'] = cs?.pValue.toFixed(5) || 'N/A';
-            row['Cramers V'] = cs?.cramersV?.toFixed(4) || 'N/A';
-            row['TVD'] = tvd?.value.toFixed(5) || 'N/A';
-            row['Is Similar'] = (cs?.isSimilar || (cs?.cramersV !== undefined && cs.cramersV < 0.1) || tvd?.isSimilar) ? 'YES' : 'NO';
-        }
+        // Populate numerical statistics if present
+        row['Mean (Orig)'] = desc ? desc.original.mean.toFixed(meta.precision) : 'N/A';
+        row['Mean (Aug)'] = desc ? desc.augmented.mean.toFixed(meta.precision) : 'N/A';
+        row['Mean Difference'] = desc ? desc.meanDifferenceCI.diff.toFixed(meta.precision) : 'N/A';
+        row['CI Lower'] = desc ? desc.meanDifferenceCI.lower.toFixed(meta.precision) : 'N/A';
+        row['CI Upper'] = desc ? desc.meanDifferenceCI.upper.toFixed(meta.precision) : 'N/A';
+        row['T-Test P'] = tt ? tt.pValue.toFixed(5) : 'N/A';
+        row['Mann-Whitney P'] = mw ? mw.pValue.toFixed(5) : 'N/A';
+        row['KS-Test P'] = ks ? ks.pValue.toFixed(5) : 'N/A';
+
+        // Populate categorical statistics if present
+        row['Chi-Square P'] = cs ? cs.pValue.toFixed(5) : 'N/A';
+        row['Cramers V'] = cs && cs.cramersV !== undefined ? cs.cramersV.toFixed(4) : 'N/A';
+        row['TVD'] = tvd ? tvd.value.toFixed(5) : 'N/A';
+
+        // Determine Similarity
+        const isNumericSimilar = tt && mw && ks ? (tt.isSimilar && mw.isSimilar && ks.isSimilar) : true;
+        const isCategoricalSimilar = cs && tvd ? (cs.isSimilar || cs.cramersV < 0.1 || tvd.isSimilar) : true;
+        
+        row['Is Similar'] = (isNumericSimilar && isCategoricalSimilar) ? 'YES' : 'NO';
+
         rows.push(row);
     });
 

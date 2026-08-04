@@ -3,7 +3,7 @@ import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import Papa from 'papaparse';
 import { CsvData, Report, ReportTab, DescriptiveStatReport, StatisticalTestResult } from './types';
 import { augmentData } from './services/dataAugmentation';
-import { generateReport, formatReportAsText, generateStatsSummaryCsv } from './services/statisticalAnalysis';
+import { generateReport, formatReportAsText, generateStatsSummaryCsv, getDetailedColumnMetadata } from './services/statisticalAnalysis';
 import { GoogleGenAI, Chat } from '@google/genai';
 import { 
     Upload, 
@@ -43,6 +43,7 @@ interface ChatMessage {
 const App: React.FC = () => {
     const [originalData, setOriginalData] = useState<CsvData | null>(null);
     const [augmentedData, setAugmentedData] = useState<CsvData | null>(null);
+    const [customColumnTypes, setCustomColumnTypes] = useState<Record<string, 'numerical' | 'categorical' | 'ordinal'>>({});
     const [fileName, setFileName] = useState<string>('');
     const [targetSize, setTargetSize] = useState<number>(1000);
     const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -93,6 +94,17 @@ const App: React.FC = () => {
                         return newRow;
                     });
                     
+                    if (cleanedData.length > 0) {
+                        const meta = getDetailedColumnMetadata(cleanedData);
+                        const initialTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
+                        Object.keys(meta).forEach(col => {
+                            initialTypes[col] = meta[col].type;
+                        });
+                        setCustomColumnTypes(initialTypes);
+                    } else {
+                        setCustomColumnTypes({});
+                    }
+
                     setOriginalData(cleanedData);
                 },
             });
@@ -102,25 +114,59 @@ const App: React.FC = () => {
     const handleReset = useCallback(() => {
         setOriginalData(null);
         setAugmentedData(null);
+        setCustomColumnTypes({});
         setFileName('');
         setReport(null);
         setError('');
         setChatMessages([]);
     }, []);
 
+    const handleColumnTypeChange = useCallback((columnName: string, newType: 'numerical' | 'categorical' | 'ordinal') => {
+        setCustomColumnTypes(prev => {
+            const next = { ...prev, [columnName]: newType };
+            if (originalData) {
+                try {
+                    if (augmentedData) {
+                        const newAug = augmentData(originalData, targetSize, next);
+                        setAugmentedData(newAug);
+                        setReport(generateReport(originalData, newAug, next));
+                    }
+                } catch (e) {
+                    console.error("Error updating augmented data with new column types:", e);
+                }
+            }
+            return next;
+        });
+    }, [originalData, augmentedData, targetSize]);
+
+    const handleResetColumnTypes = useCallback(() => {
+        if (!originalData) return;
+        const meta = getDetailedColumnMetadata(originalData);
+        const initialTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
+        Object.keys(meta).forEach(col => {
+            initialTypes[col] = meta[col].type;
+        });
+        setCustomColumnTypes(initialTypes);
+        if (augmentedData) {
+            const newAug = augmentData(originalData, targetSize, initialTypes);
+            setAugmentedData(newAug);
+            setReport(generateReport(originalData, newAug, initialTypes));
+        }
+    }, [originalData, augmentedData, targetSize]);
+
     const handleAugmentData = useCallback(() => {
         if (!originalData) return;
         setIsLoading(true); setError(''); setReport(null); setAugmentedData(null);
         setTimeout(() => {
             try {
-                const augmented = augmentData(originalData, targetSize);
+                const augmented = augmentData(originalData, targetSize, customColumnTypes);
                 setAugmentedData(augmented);
-                setReport(generateReport(originalData, augmented));
+                setReport(generateReport(originalData, augmented, customColumnTypes));
             } catch (e) {
                 setError(e instanceof Error ? e.message : 'Error during augmentation.');
             } finally { setIsLoading(false); }
         }, 50);
-    }, [originalData, targetSize]);
+    }, [originalData, targetSize, customColumnTypes]);
 
     const handleDownload = () => {
         if (!augmentedData) return;
@@ -193,6 +239,10 @@ const App: React.FC = () => {
                                 targetSize={targetSize} onTargetSizeChange={setTargetSize}
                                 onAugment={handleAugmentData} isDataLoaded={!!originalData} isLoading={isLoading}
                                 onReset={handleReset}
+                                originalData={originalData}
+                                customColumnTypes={customColumnTypes}
+                                onColumnTypeChange={handleColumnTypeChange}
+                                onResetColumnTypes={handleResetColumnTypes}
                             />
                         </div>
                         
@@ -275,8 +325,21 @@ const App: React.FC = () => {
     );
 };
 
-const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, onTargetSizeChange, onAugment, isDataLoaded, isLoading, onReset }) => (
-    <div className="space-y-10">
+const ControlsSection: React.FC<any> = ({ 
+    fileName, 
+    onFileChange, 
+    targetSize, 
+    onTargetSizeChange, 
+    onAugment, 
+    isDataLoaded, 
+    isLoading, 
+    onReset,
+    originalData,
+    customColumnTypes,
+    onColumnTypeChange,
+    onResetColumnTypes
+}) => (
+    <div className="space-y-8">
         <section>
             <div className="flex items-center gap-3 mb-6">
                 <span className="flex items-center justify-center w-8 h-8 rounded-2xl bg-blue-600 text-white text-xs font-black shadow-lg shadow-blue-100">1</span>
@@ -284,7 +347,7 @@ const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, on
             </div>
             
             {!fileName ? (
-                <div className="group relative border-2 border-dashed border-slate-200 rounded-[2rem] p-10 text-center hover:border-blue-400 hover:bg-blue-50/50 transition-all duration-500 cursor-pointer overflow-hidden">
+                <div className="group relative border-2 border-dashed border-slate-200 rounded-[2rem] p-8 text-center hover:border-blue-400 hover:bg-blue-50/50 transition-all duration-500 cursor-pointer overflow-hidden">
                     <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
                     <input type="file" onChange={onFileChange} accept=".csv" className="absolute inset-0 opacity-0 cursor-pointer z-10" id="f-up" />
                     <div className="flex flex-col items-center relative z-0">
@@ -296,17 +359,19 @@ const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, on
                     </div>
                 </div>
             ) : (
-                <div className="p-5 bg-white rounded-2xl border border-slate-200 flex justify-between items-center shadow-sm group hover:border-blue-200 transition-all">
-                    <div className="flex items-center gap-4 overflow-hidden">
-                        <div className="p-2.5 bg-blue-50 rounded-xl group-hover:bg-blue-100 transition-colors">
+                <div className="p-4 bg-white rounded-2xl border border-slate-200 flex justify-between items-center shadow-sm group hover:border-blue-200 transition-all">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                        <div className="p-2.5 bg-blue-50 rounded-xl group-hover:bg-blue-100 transition-colors shrink-0">
                             <Database className="h-5 w-5 text-blue-600" />
                         </div>
                         <div className="overflow-hidden">
                             <span className="block font-bold text-slate-800 truncate text-sm">{fileName}</span>
-                            <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-tighter">Ready for synthesis</span>
+                            <span className="block text-[10px] text-slate-400 font-bold uppercase tracking-tighter">
+                                {originalData?.length || 0} rows • {Object.keys(originalData?.[0] || {}).length} variables
+                            </span>
                         </div>
                     </div>
-                    <button onClick={onReset} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all">
+                    <button onClick={onReset} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all shrink-0">
                         <X className="h-5 w-5" />
                     </button>
                 </div>
@@ -314,8 +379,77 @@ const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, on
         </section>
 
         <section className={isDataLoaded ? 'animate-in fade-in slide-in-from-top-4 duration-700' : 'opacity-30 pointer-events-none'}>
+            <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                    <span className="flex items-center justify-center w-8 h-8 rounded-2xl bg-blue-600 text-white text-xs font-black shadow-lg shadow-blue-100">2</span>
+                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Validate Data Types</h3>
+                </div>
+                {isDataLoaded && (
+                    <button 
+                        onClick={onResetColumnTypes} 
+                        className="text-[10px] font-bold text-slate-400 hover:text-blue-600 transition-colors uppercase tracking-wider"
+                    >
+                        Reset Defaults
+                    </button>
+                )}
+            </div>
+
+            {isDataLoaded && originalData && originalData.length > 0 ? (
+                <div className="space-y-3">
+                    <p className="text-xs text-slate-500 font-medium leading-relaxed">
+                        Verify auto-detected variable types. Select from the drop-down to override any misclassified variables:
+                    </p>
+                    
+                    <div className="max-h-56 overflow-y-auto pr-1 space-y-2 rounded-2xl border border-slate-200/80 p-2.5 bg-slate-50/50">
+                        {Object.keys(originalData[0] || {}).map((col) => {
+                            const currentType = customColumnTypes[col] || 'numerical';
+                            const values = originalData.map(r => r[col]).filter(v => v !== null && v !== undefined);
+                            const uniqCount = new Set(values).size;
+                            
+                            return (
+                                <div key={col} className="p-2.5 bg-white rounded-xl border border-slate-100 shadow-2xs flex items-center justify-between gap-3 hover:border-blue-200 transition-all">
+                                    <div className="min-w-0 flex-1">
+                                        <span className="block font-black text-slate-800 text-xs truncate" title={col}>
+                                            {col}
+                                        </span>
+                                        <span className="block text-[10px] text-slate-400 font-semibold">
+                                            {uniqCount} unique value{uniqCount !== 1 ? 's' : ''}
+                                        </span>
+                                    </div>
+                                    
+                                    <select
+                                        value={currentType}
+                                        onChange={(e) => onColumnTypeChange(col, e.target.value as 'numerical' | 'categorical' | 'ordinal')}
+                                        className={`text-xs font-black rounded-lg px-2.5 py-1.5 border outline-none transition-all cursor-pointer shrink-0 ${
+                                            currentType === 'numerical'
+                                                ? 'bg-blue-50/80 border-blue-200 text-blue-700 focus:ring-2 focus:ring-blue-500/20'
+                                                : currentType === 'ordinal'
+                                                ? 'bg-amber-50/80 border-amber-200 text-amber-700 focus:ring-2 focus:ring-amber-500/20'
+                                                : 'bg-purple-50/80 border-purple-200 text-purple-700 focus:ring-2 focus:ring-purple-500/20'
+                                        }`}
+                                    >
+                                        <option value="numerical">Numerical</option>
+                                        <option value="categorical">Categorical</option>
+                                        <option value="ordinal">Ordinal</option>
+                                    </select>
+                                </div>
+                            );
+                        })}
+                    </div>
+                    
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-bold uppercase tracking-wider pt-1 px-1">
+                        <span>Total: {Object.keys(originalData[0] || {}).length} variables</span>
+                        <span className="text-slate-600">
+                            <span className="text-blue-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'numerical').length}</span> Numerical • <span className="text-amber-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'ordinal').length}</span> Ordinal • <span className="text-purple-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'categorical').length}</span> Categorical
+                        </span>
+                    </div>
+                </div>
+            ) : null}
+        </section>
+
+        <section className={isDataLoaded ? 'animate-in fade-in slide-in-from-top-4 duration-700' : 'opacity-30 pointer-events-none'}>
             <div className="flex items-center gap-3 mb-6">
-                <span className="flex items-center justify-center w-8 h-8 rounded-2xl bg-blue-100 text-blue-600 text-xs font-black">2</span>
+                <span className="flex items-center justify-center w-8 h-8 rounded-2xl bg-blue-100 text-blue-600 text-xs font-black">3</span>
                 <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Synthesis Config</h3>
             </div>
             
@@ -340,7 +474,7 @@ const ControlsSection: React.FC<any> = ({ fileName, onFileChange, targetSize, on
             </div>
         </section>
 
-        <div className="pt-6">
+        <div className="pt-2">
             <button 
                 onClick={onAugment} 
                 disabled={!isDataLoaded || isLoading} 
@@ -676,72 +810,130 @@ const DescriptiveStatsTable: React.FC<any> = ({ data, report }) => (
 
 const HistogramDisplay: React.FC<any> = ({ report, originalData, augmentedData }) => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-8">
-        {report.descriptiveStats.map((s: any) => (
+        {Object.keys(report.columnMetadata || {}).map((colName) => (
             <Histogram 
-                key={s.column} 
-                title={s.column} 
-                originalData={originalData.map((r: any) => r[s.column])} 
-                augmentedData={augmentedData.map((r: any) => r[s.column])} 
+                key={colName} 
+                title={colName} 
+                isNumerical={report.columnMetadata[colName]?.type === 'numerical' && !report.columnMetadata[colName]?.isHeuristicCategorical}
+                originalData={originalData.map((r: any) => r[colName])} 
+                augmentedData={augmentedData.map((r: any) => r[colName])} 
             />
         ))}
     </div>
 );
 
-const Histogram: React.FC<any> = ({ originalData, augmentedData, title }) => {
-    const bins = 15;
-    const all = [...originalData, ...augmentedData].filter(v => v !== null && typeof v === 'number');
-    if (all.length === 0) return null;
+const Histogram: React.FC<any> = ({ originalData, augmentedData, title, isNumerical }) => {
+    const cleanOrig = originalData.filter((v: any) => v !== null && v !== undefined);
+    const cleanAug = augmentedData.filter((v: any) => v !== null && v !== undefined);
     
-    const min = Math.min(...all); const max = Math.max(...all);
-    const range = max - min;
-    const step = range === 0 ? 1 : range / bins;
-    
-    const counts = Array.from({length: bins}, (_, i) => {
-        const binMin = min + i*step;
-        const binMax = i === bins - 1 ? max + 0.0001 : min + (i+1)*step;
-        return {
-            o: originalData.filter((v: any) => v >= binMin && v < binMax).length / (originalData.length || 1),
-            a: augmentedData.filter((v: any) => v >= binMin && v < binMax).length / (augmentedData.length || 1)
-        };
-    });
+    if (cleanOrig.length === 0 && cleanAug.length === 0) return null;
+
+    let counts: { label: string; o: number; a: number }[] = [];
+    let minLabel = '';
+    let maxLabel = '';
+
+    if (isNumerical) {
+        const bins = 15;
+        const allNumeric = [...cleanOrig, ...cleanAug].map(Number).filter(v => typeof v === 'number' && !isNaN(v));
+        if (allNumeric.length === 0) return null;
+
+        const min = Math.min(...allNumeric);
+        const max = Math.max(...allNumeric);
+        const range = max - min;
+        const step = range === 0 ? 1 : range / bins;
+
+        counts = Array.from({ length: bins }, (_, i) => {
+            const binMin = min + i * step;
+            const binMax = i === bins - 1 ? max + 0.0001 : min + (i + 1) * step;
+            const originalInBin = cleanOrig.filter((v: any) => {
+                const num = Number(v);
+                return !isNaN(num) && num >= binMin && num < binMax;
+            }).length;
+            const augmentedInBin = cleanAug.filter((v: any) => {
+                const num = Number(v);
+                return !isNaN(num) && num >= binMin && num < binMax;
+            }).length;
+            
+            return {
+                label: `${binMin.toFixed(1)}-${binMax.toFixed(1)}`,
+                o: originalInBin / (cleanOrig.length || 1),
+                a: augmentedInBin / (cleanAug.length || 1)
+            };
+        });
+        minLabel = min.toFixed(1);
+        maxLabel = max.toFixed(1);
+    } else {
+        // Categorical or discrete discrete variables: find unique values from original and augmented
+        const uniqueVals = Array.from(new Set([...cleanOrig, ...cleanAug])).map(v => String(v).trim());
+        
+        // Sort unique values nicely
+        uniqueVals.sort((a, b) => {
+            const numA = Number(a);
+            const numB = Number(b);
+            if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+            return a.localeCompare(b);
+        });
+
+        // Limit to top 15 categories to avoid visual clutter
+        const topVals = uniqueVals.slice(0, 15);
+
+        counts = topVals.map(val => {
+            const oCount = cleanOrig.filter((v: any) => String(v).trim() === val).length;
+            const aCount = cleanAug.filter((v: any) => String(v).trim() === val).length;
+            return {
+                label: val,
+                o: oCount / (cleanOrig.length || 1),
+                a: aCount / (cleanAug.length || 1)
+            };
+        });
+        minLabel = topVals[0] || '';
+        maxLabel = topVals[topVals.length - 1] || '';
+    }
+
     const maxH = Math.max(...counts.map(c => Math.max(c.o, c.a)), 0.001);
 
     return (
-        <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300">
-            <div className="flex justify-between items-center mb-6">
-                <div className="text-xs font-black text-slate-800 uppercase tracking-widest">{title}</div>
-                <div className="flex gap-4">
-                    <div className="flex items-center gap-2 text-[9px] font-black text-slate-400 uppercase tracking-tighter">
-                        <div className="w-2.5 h-2.5 bg-blue-500 rounded-full shadow-sm shadow-blue-200"></div>
-                        Original
-                    </div>
-                    <div className="flex items-center gap-2 text-[9px] font-black text-slate-400 uppercase tracking-tighter">
-                        <div className="w-2.5 h-2.5 bg-rose-500 rounded-full shadow-sm shadow-rose-200"></div>
-                        Synthetic
+        <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between min-h-[300px]">
+            <div>
+                <div className="flex justify-between items-center mb-6">
+                    <div className="text-xs font-black text-slate-800 uppercase tracking-widest truncate max-w-[60%]">{title}</div>
+                    <div className="flex gap-4 shrink-0">
+                        <div className="flex items-center gap-2 text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            <div className="w-2.5 h-2.5 bg-blue-500 rounded-full shadow-sm shadow-blue-200"></div>
+                            Original
+                        </div>
+                        <div className="flex items-center gap-2 text-[9px] font-black text-slate-400 uppercase tracking-tighter">
+                            <div className="w-2.5 h-2.5 bg-rose-500 rounded-full shadow-sm shadow-rose-200"></div>
+                            Synthetic
+                        </div>
                     </div>
                 </div>
+                <div className="h-40 flex items-end gap-[3px] border-b border-slate-100 px-1 relative">
+                    {counts.map((c, i) => (
+                        <div key={i} className="flex-1 flex gap-[1.5px] items-end h-full group relative" style={{ width: '100%' }}>
+                            <motion.div 
+                                initial={{ height: 0 }}
+                                animate={{ height: `${(c.o / maxH) * 100}%` }}
+                                transition={{ duration: 0.8, delay: i * 0.02 }}
+                                className="bg-blue-500 w-full rounded-t-sm opacity-80 group-hover:opacity-100 transition-opacity"
+                            />
+                            <motion.div 
+                                initial={{ height: 0 }}
+                                animate={{ height: `${(c.a / maxH) * 100}%` }}
+                                transition={{ duration: 0.8, delay: i * 0.02 + 0.1 }}
+                                className="bg-rose-500 w-full rounded-t-sm opacity-80 group-hover:opacity-100 transition-opacity"
+                            />
+                            {/* Elegant custom tooltip on hover */}
+                            <div className="absolute hidden group-hover:flex bottom-full left-1/2 -translate-x-1/2 bg-slate-900 border border-slate-850 text-white text-[9px] font-bold p-2.5 rounded-xl shadow-2xl z-20 whitespace-nowrap mb-1">
+                                {c.label}: Orig {(c.o * 100).toFixed(1)}% | Synth {(c.a * 100).toFixed(1)}%
+                            </div>
+                        </div>
+                    ))}
+                </div>
             </div>
-            <div className="h-40 flex items-end gap-[3px] border-b border-slate-100 px-1 relative">
-                {counts.map((c, i) => (
-                    <div key={i} className="flex-1 flex gap-[1.5px] items-end h-full group relative" style={{ width: '100%' }}>
-                        <motion.div 
-                            initial={{ height: 0 }}
-                            animate={{ height: `${(c.o/maxH)*100}%` }}
-                            transition={{ duration: 0.8, delay: i * 0.02 }}
-                            className="bg-blue-500 w-full rounded-t-md opacity-80 group-hover:opacity-100 transition-opacity"
-                        />
-                        <motion.div 
-                            initial={{ height: 0 }}
-                            animate={{ height: `${(c.a/maxH)*100}%` }}
-                            transition={{ duration: 0.8, delay: i * 0.02 + 0.1 }}
-                            className="bg-rose-500 w-full rounded-t-md opacity-80 group-hover:opacity-100 transition-opacity"
-                        />
-                    </div>
-                ))}
-            </div>
-            <div className="flex justify-between text-[10px] font-black text-slate-300 mt-3 uppercase tracking-[0.2em]">
-                <span>{min.toFixed(1)}</span>
-                <span>{max.toFixed(1)}</span>
+            <div className="flex justify-between text-[10px] font-black text-slate-300 mt-4 uppercase tracking-wider overflow-hidden">
+                <span className="truncate max-w-[45%] font-bold">{minLabel}</span>
+                <span className="truncate max-w-[45%] font-bold">{maxLabel}</span>
             </div>
         </div>
     );

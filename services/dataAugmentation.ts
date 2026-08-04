@@ -19,9 +19,12 @@ const getPrecision = (values: (string | number)[]): number => {
     return maxPrecision;
 };
 
-const getColumnTypes = (data: CsvData): Record<string, { type: 'numerical' | 'categorical', precision: number }> => {
+const getColumnTypes = (
+  data: CsvData,
+  customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+): Record<string, { type: 'numerical' | 'categorical' | 'ordinal', precision: number }> => {
   if (data.length === 0) return {};
-  const columnTypes: Record<string, { type: 'numerical' | 'categorical', precision: number }> = {};
+  const columnTypes: Record<string, { type: 'numerical' | 'categorical' | 'ordinal', precision: number }> = {};
   const headers = Object.keys(data[0]);
 
   for (const header of headers) {
@@ -29,16 +32,19 @@ const getColumnTypes = (data: CsvData): Record<string, { type: 'numerical' | 'ca
     const uniqueValues = new Set(values);
     
     const isNumericType = values.length > 0 && values.slice(0, 50).every(val => 
-      typeof val === 'number' && !isNaN(val)
+      val !== null && val !== undefined && !isNaN(Number(String(val).trim()))
     );
 
     const precision = isNumericType ? getPrecision(values) : 0;
 
-    if (isNumericType && uniqueValues.size > 10) {
-        columnTypes[header] = { type: 'numerical', precision };
+    let type: 'numerical' | 'categorical' | 'ordinal';
+    if (customColumnTypes && customColumnTypes[header]) {
+      type = customColumnTypes[header];
     } else {
-        columnTypes[header] = { type: 'categorical', precision: 0 };
+      type = (isNumericType && uniqueValues.size > 10) ? 'numerical' : 'categorical';
     }
+
+    columnTypes[header] = { type, precision };
   }
   return columnTypes;
 };
@@ -134,13 +140,17 @@ const predictCategoricalValue = (
     return weightedRandomChoice(classCounts);
 };
 
-export const augmentData = (originalData: CsvData, targetSize: number): CsvData => {
+export const augmentData = (
+  originalData: CsvData, 
+  targetSize: number,
+  customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+): CsvData => {
   if (originalData.length === 0) return [];
 
-  const colInfo = getColumnTypes(originalData);
+  const colInfo = getColumnTypes(originalData, customColumnTypes);
   const headers = Object.keys(originalData[0]);
   const numericalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'numerical');
-  const categoricalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'categorical');
+  const categoricalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'categorical' || colInfo[key].type === 'ordinal');
   
   const stats = getColumnStats(originalData, numericalColumns);
   const normalizedOriginalMatrix = getNormalizedFeatureMatrix(originalData, numericalColumns, stats);

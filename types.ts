@@ -2,7 +2,7 @@
 export type CsvData = Record<string, number | string>[];
 
 export interface ColumnMetadata {
-  type: 'numerical' | 'categorical';
+  type: 'numerical' | 'categorical' | 'ordinal';
   uniqueCount: number;
   isHeuristicCategorical: boolean; // True if numeric but treated as categorical due to low cardinality
   precision: number; // Number of decimal places to preserve
@@ -26,7 +26,7 @@ export interface Report {
   ksTest: StatisticalTestResult[];
   chiSquare: StatisticalTestResult[];
   totalVariationDistance: { column: string; value: number; isSimilar: boolean }[];
-  columnTypes: Record<string, 'numerical' | 'categorical'>;
+  columnTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'>;
   columnMetadata: Record<string, ColumnMetadata>;
   summary: ReportSummary;
 }
