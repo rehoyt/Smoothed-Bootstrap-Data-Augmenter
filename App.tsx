@@ -20,9 +20,11 @@ import {
     Database,
     CheckCircle2,
     AlertCircle,
-    Info
+    Info,
+    SlidersHorizontal
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { DataTypeEvaluationWorkspace } from './components/DataTypeEvaluationWorkspace';
 
 const formatPValue = (pValue: number): string => {
     if (pValue < 0.001) return '< 0.001';
@@ -43,7 +45,7 @@ interface ChatMessage {
 const App: React.FC = () => {
     const [originalData, setOriginalData] = useState<CsvData | null>(null);
     const [augmentedData, setAugmentedData] = useState<CsvData | null>(null);
-    const [customColumnTypes, setCustomColumnTypes] = useState<Record<string, 'numerical' | 'categorical' | 'ordinal'>>({});
+    const [customColumnTypes, setCustomColumnTypes] = useState<Record<string, 'continuous' | 'categorical' | 'ordinal'>>({});
     const [fileName, setFileName] = useState<string>('');
     const [targetSize, setTargetSize] = useState<number>(1000);
     const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -79,14 +81,14 @@ const App: React.FC = () => {
                 complete: (results: any) => {
                     if (results.errors.length > 0) { setError(`Error: ${results.errors[0].message}`); return; }
                     
-                    // Clean data: treat "null", "continuous", "NaN" strings as null
+                    // Clean data: treat empty / standard null strings as null
                     const cleanedData = results.data.map((row: any) => {
                         const newRow = { ...row };
                         for (const key in newRow) {
                             const val = newRow[key];
                             if (typeof val === 'string') {
                                 const lower = val.toLowerCase().trim();
-                                if (lower === 'null' || lower === 'continuous' || lower === 'nan' || lower === 'n/a' || lower === 'undefined') {
+                                if (lower === 'null' || lower === 'nan' || lower === 'n/a' || lower === 'na' || lower === 'undefined' || lower === '') {
                                     newRow[key] = null;
                                 }
                             }
@@ -96,9 +98,10 @@ const App: React.FC = () => {
                     
                     if (cleanedData.length > 0) {
                         const meta = getDetailedColumnMetadata(cleanedData);
-                        const initialTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
+                        const initialTypes: Record<string, 'continuous' | 'categorical' | 'ordinal'> = {};
                         Object.keys(meta).forEach(col => {
-                            initialTypes[col] = meta[col].type;
+                            const t = meta[col].type;
+                            initialTypes[col] = (t === 'numerical' ? 'continuous' : t) as 'continuous' | 'categorical' | 'ordinal';
                         });
                         setCustomColumnTypes(initialTypes);
                     } else {
@@ -121,7 +124,7 @@ const App: React.FC = () => {
         setChatMessages([]);
     }, []);
 
-    const handleColumnTypeChange = useCallback((columnName: string, newType: 'numerical' | 'categorical' | 'ordinal') => {
+    const handleColumnTypeChange = useCallback((columnName: string, newType: 'continuous' | 'categorical' | 'ordinal') => {
         setCustomColumnTypes(prev => {
             const next = { ...prev, [columnName]: newType };
             if (originalData) {
@@ -142,9 +145,10 @@ const App: React.FC = () => {
     const handleResetColumnTypes = useCallback(() => {
         if (!originalData) return;
         const meta = getDetailedColumnMetadata(originalData);
-        const initialTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
+        const initialTypes: Record<string, 'continuous' | 'categorical' | 'ordinal'> = {};
         Object.keys(meta).forEach(col => {
-            initialTypes[col] = meta[col].type;
+            const t = meta[col].type;
+            initialTypes[col] = (t === 'numerical' ? 'continuous' : t) as 'continuous' | 'categorical' | 'ordinal';
         });
         setCustomColumnTypes(initialTypes);
         if (augmentedData) {
@@ -294,8 +298,37 @@ const App: React.FC = () => {
                                             className="h-full"
                                         >
                                             <ReportDisplay 
-                                                report={report} onDownload={handleDownload} onDownloadReport={handleDownloadReport} 
-                                                onDownloadStats={handleDownloadStatsSummary} originalData={originalData!} augmentedData={augmentedData!}
+                                                report={report} 
+                                                onDownload={handleDownload} 
+                                                onDownloadReport={handleDownloadReport} 
+                                                onDownloadStats={handleDownloadStatsSummary} 
+                                                originalData={originalData!} 
+                                                augmentedData={augmentedData!}
+                                                customColumnTypes={customColumnTypes}
+                                                onColumnTypeChange={handleColumnTypeChange}
+                                                onResetColumnTypes={handleResetColumnTypes}
+                                                onAugment={handleAugmentData}
+                                                targetSize={targetSize}
+                                                isLoading={isLoading}
+                                            />
+                                        </motion.div>
+                                    ) : originalData ? (
+                                        <motion.div 
+                                            key="evaluation"
+                                            initial={{ opacity: 0, y: 10 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            className="h-full flex flex-col"
+                                        >
+                                            <DataTypeEvaluationWorkspace
+                                                originalData={originalData}
+                                                fileName={fileName}
+                                                customColumnTypes={customColumnTypes}
+                                                onColumnTypeChange={handleColumnTypeChange}
+                                                onResetColumnTypes={handleResetColumnTypes}
+                                                onAugment={handleAugmentData}
+                                                targetSize={targetSize}
+                                                isLoading={isLoading}
+                                                isPostSynthesis={false}
                                             />
                                         </motion.div>
                                     ) : (
@@ -382,7 +415,7 @@ const ControlsSection: React.FC<any> = ({
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                     <span className="flex items-center justify-center w-8 h-8 rounded-2xl bg-blue-600 text-white text-xs font-black shadow-lg shadow-blue-100">2</span>
-                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Validate Data Types</h3>
+                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Step 2: Evaluate Data Types</h3>
                 </div>
                 {isDataLoaded && (
                     <button 
@@ -397,13 +430,14 @@ const ControlsSection: React.FC<any> = ({
             {isDataLoaded && originalData && originalData.length > 0 ? (
                 <div className="space-y-3">
                     <p className="text-xs text-slate-500 font-medium leading-relaxed">
-                        Verify auto-detected variable types. Select from the drop-down to override any misclassified variables:
+                        Verify auto-detected variable types. Select from the dropdown to correct any mislabeled variables:
                     </p>
                     
                     <div className="max-h-56 overflow-y-auto pr-1 space-y-2 rounded-2xl border border-slate-200/80 p-2.5 bg-slate-50/50">
                         {Object.keys(originalData[0] || {}).map((col) => {
-                            const currentType = customColumnTypes[col] || 'numerical';
-                            const values = originalData.map(r => r[col]).filter(v => v !== null && v !== undefined);
+                            const rawType = customColumnTypes[col] || 'continuous';
+                            const currentType = (rawType === 'numerical' ? 'continuous' : rawType) as 'continuous' | 'categorical' | 'ordinal';
+                            const values = originalData.map(r => r[col]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
                             const uniqCount = new Set(values).size;
                             
                             return (
@@ -419,16 +453,16 @@ const ControlsSection: React.FC<any> = ({
                                     
                                     <select
                                         value={currentType}
-                                        onChange={(e) => onColumnTypeChange(col, e.target.value as 'numerical' | 'categorical' | 'ordinal')}
+                                        onChange={(e) => onColumnTypeChange(col, e.target.value as 'continuous' | 'categorical' | 'ordinal')}
                                         className={`text-xs font-black rounded-lg px-2.5 py-1.5 border outline-none transition-all cursor-pointer shrink-0 ${
-                                            currentType === 'numerical'
+                                            currentType === 'continuous'
                                                 ? 'bg-blue-50/80 border-blue-200 text-blue-700 focus:ring-2 focus:ring-blue-500/20'
                                                 : currentType === 'ordinal'
                                                 ? 'bg-amber-50/80 border-amber-200 text-amber-700 focus:ring-2 focus:ring-amber-500/20'
                                                 : 'bg-purple-50/80 border-purple-200 text-purple-700 focus:ring-2 focus:ring-purple-500/20'
                                         }`}
                                     >
-                                        <option value="numerical">Numerical</option>
+                                        <option value="continuous">Continuous</option>
                                         <option value="categorical">Categorical</option>
                                         <option value="ordinal">Ordinal</option>
                                     </select>
@@ -440,7 +474,7 @@ const ControlsSection: React.FC<any> = ({
                     <div className="flex items-center justify-between text-[10px] text-slate-400 font-bold uppercase tracking-wider pt-1 px-1">
                         <span>Total: {Object.keys(originalData[0] || {}).length} variables</span>
                         <span className="text-slate-600">
-                            <span className="text-blue-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'numerical').length}</span> Numerical • <span className="text-amber-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'ordinal').length}</span> Ordinal • <span className="text-purple-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'categorical').length}</span> Categorical
+                            <span className="text-blue-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'continuous' || (t as any) === 'numerical').length}</span> Continuous • <span className="text-amber-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'ordinal').length}</span> Ordinal • <span className="text-purple-600 font-black">{Object.values(customColumnTypes).filter(t => t === 'categorical').length}</span> Categorical
                         </span>
                     </div>
                 </div>
@@ -507,11 +541,25 @@ const ControlsSection: React.FC<any> = ({
     </div>
 );
 
-const ReportDisplay: React.FC<any> = ({ report, onDownload, onDownloadReport, onDownloadStats, originalData, augmentedData }) => {
+const ReportDisplay: React.FC<any> = ({ 
+    report, 
+    onDownload, 
+    onDownloadReport, 
+    onDownloadStats, 
+    originalData, 
+    augmentedData,
+    customColumnTypes,
+    onColumnTypeChange,
+    onResetColumnTypes,
+    onAugment,
+    targetSize,
+    isLoading
+}) => {
     const [activeTab, setActiveTab] = useState<ReportTab>(ReportTab.SUMMARY);
     
     const tabs = [
         { id: ReportTab.SUMMARY, icon: Info, label: 'Overview' },
+        { id: ReportTab.DATA_TYPES, icon: SlidersHorizontal, label: 'Variable Types' },
         { id: ReportTab.HISTOGRAMS, icon: BarChart3, label: 'Distributions' },
         { id: ReportTab.T_TEST, icon: Activity, label: 'T-Tests' },
         { id: ReportTab.MANN_WHITNEY, icon: Activity, label: 'U-Tests' },
@@ -566,10 +614,27 @@ const ReportDisplay: React.FC<any> = ({ report, onDownload, onDownloadReport, on
                         exit={{ opacity: 0, x: -10 }}
                         transition={{ duration: 0.2 }}
                     >
-                        {activeTab === ReportTab.SUMMARY && <SummaryView report={report} />}
+                        {activeTab === ReportTab.SUMMARY && (
+                            <SummaryView 
+                                report={report} 
+                                onNavigateToDataTypes={() => setActiveTab(ReportTab.DATA_TYPES)}
+                            />
+                        )}
+                        {activeTab === ReportTab.DATA_TYPES && (
+                            <DataTypeEvaluationWorkspace
+                                originalData={originalData}
+                                customColumnTypes={customColumnTypes}
+                                onColumnTypeChange={onColumnTypeChange}
+                                onResetColumnTypes={onResetColumnTypes}
+                                onAugment={onAugment}
+                                targetSize={targetSize}
+                                isLoading={isLoading}
+                                isPostSynthesis={true}
+                            />
+                        )}
                         {activeTab === ReportTab.HISTOGRAMS && <HistogramDisplay report={report} originalData={originalData} augmentedData={augmentedData} />}
                         {activeTab === ReportTab.CATEGORICAL && <CategoricalResultsTable report={report} />}
-                        {activeTab !== ReportTab.SUMMARY && activeTab !== ReportTab.HISTOGRAMS && activeTab !== ReportTab.CATEGORICAL && (
+                        {activeTab !== ReportTab.SUMMARY && activeTab !== ReportTab.DATA_TYPES && activeTab !== ReportTab.HISTOGRAMS && activeTab !== ReportTab.CATEGORICAL && (
                             <TestResultTable 
                                 title={`${activeTab} Results`} 
                                 data={(report as any)[activeTab === ReportTab.T_TEST ? 'tTest' : activeTab === ReportTab.MANN_WHITNEY ? 'mannWhitney' : 'ksTest']} 
@@ -583,7 +648,7 @@ const ReportDisplay: React.FC<any> = ({ report, onDownload, onDownloadReport, on
     );
 };
 
-const SummaryView: React.FC<any> = ({ report }) => (
+const SummaryView: React.FC<any> = ({ report, onNavigateToDataTypes }) => (
     <div className="space-y-8 animate-in fade-in duration-700">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <StatCard 
@@ -607,6 +672,30 @@ const SummaryView: React.FC<any> = ({ report }) => (
                 color="purple"
                 icon={Database}
             />
+        </div>
+
+        {/* Evaluated Variable Overview Banner */}
+        <div className="p-5 bg-white rounded-2xl border border-slate-100 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-blue-50 text-blue-600 rounded-xl">
+                    <SlidersHorizontal className="h-5 w-5" />
+                </div>
+                <div>
+                    <h5 className="text-xs font-black text-slate-800 uppercase tracking-wider">Evaluated Variable Data Types</h5>
+                    <p className="text-xs text-slate-500 font-medium mt-0.5">
+                        <span className="text-blue-600 font-black">{report.summary.totalContinuous ?? report.summary.totalNumerical} Continuous</span> • <span className="text-purple-600 font-black">{report.summary.totalCategorical} Categorical</span> {report.summary.totalOrdinal ? <span>• <span className="text-amber-600 font-black">{report.summary.totalOrdinal} Ordinal</span></span> : null}
+                    </p>
+                </div>
+            </div>
+            {onNavigateToDataTypes && (
+                <button
+                    onClick={onNavigateToDataTypes}
+                    className="self-start sm:self-center text-xs font-black text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100/80 px-4 py-2 rounded-xl transition-all flex items-center gap-1.5 shrink-0"
+                >
+                    Review / Adjust Classifications
+                    <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+            )}
         </div>
 
         <div className="bg-slate-50/50 p-8 rounded-[2rem] border border-slate-100 flex flex-col md:flex-row justify-between gap-8 relative overflow-hidden">
@@ -684,13 +773,13 @@ const StatCard: React.FC<{label: string, value: number, total: number, color: st
 };
 
 const VariableTypeBadge: React.FC<{meta: any}> = ({meta}) => {
-    if (meta.isHeuristicCategorical) {
-        return <span className="px-2.5 py-1 bg-purple-50 text-purple-600 border border-purple-100 rounded-lg text-[9px] font-black uppercase tracking-widest">Discrete</span>;
+    if (meta.type === 'ordinal') {
+        return <span className="px-2.5 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg text-[9px] font-black uppercase tracking-widest">Ordinal</span>;
     }
-    if (meta.type === 'numerical') {
-        return <span className="px-2.5 py-1 bg-blue-50 text-blue-600 border border-blue-100 rounded-lg text-[9px] font-black uppercase tracking-widest">Continuous</span>;
+    if (meta.type === 'continuous' || meta.type === 'numerical') {
+        return <span className="px-2.5 py-1 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-[9px] font-black uppercase tracking-widest">Continuous</span>;
     }
-    return <span className="px-2.5 py-1 bg-slate-100 text-slate-600 border border-slate-200 rounded-lg text-[9px] font-black uppercase tracking-widest">Categorical</span>;
+    return <span className="px-2.5 py-1 bg-purple-50 text-purple-700 border border-purple-200 rounded-lg text-[9px] font-black uppercase tracking-widest">Categorical</span>;
 };
 
 const TestResultTable: React.FC<any> = ({ title, data, report }) => (

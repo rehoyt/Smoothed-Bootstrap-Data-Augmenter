@@ -1,5 +1,6 @@
 {
   "name": "BootstrapMD",
-  "description": "A professional-grade medical data augmentation tool using smoothed bootstrapping and adaptive Gaussian noise with comprehensive statistical verification.",
-  "requestFramePermissions": []
+  "description": "A professional-grade medical data augmentation tool with early data type evaluation (continuous, categorical, ordinal) and statistical validation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

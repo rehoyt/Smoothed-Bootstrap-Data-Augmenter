@@ -104,46 +104,68 @@ const calculateKSTest = (arr1: number[], arr2: number[]): { D: number; p: number
 
 export const getDetailedColumnMetadata = (
     data: CsvData,
-    customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+    customColumnTypes?: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'>
 ): Record<string, ColumnMetadata> => {
   if (data.length === 0) return {};
   const metadata: Record<string, ColumnMetadata> = {};
   const headers = Object.keys(data[0]);
   
   for (const header of headers) {
-    const values = data.map(r => r[header]).filter(v => v !== null && v !== undefined);
-    const uniqueValues = new Set(values);
+    const rawValues = data.map(r => r[header]);
+    const validValues = rawValues.filter(v => v !== null && v !== undefined && String(v).trim() !== '');
+    const uniqueValues = new Set(validValues);
     const uniqueCount = uniqueValues.size;
     
-    let isNumericType = values.length > 0;
-    for (let i = 0; i < Math.min(values.length, 50); i++) {
-        const val = values[i];
-        if (val === null || val === undefined || isNaN(Number(String(val).trim()))) {
+    let isNumericType = validValues.length > 0;
+    for (let i = 0; i < Math.min(validValues.length, 100); i++) {
+        const val = validValues[i];
+        const str = String(val).trim();
+        if (str === '' || isNaN(Number(str))) {
             isNumericType = false;
             break;
         }
     }
 
-    const precision = isNumericType ? getPrecision(values) : 0;
+    const precision = isNumericType ? getPrecision(validValues) : 0;
     
-    let type: 'numerical' | 'categorical' | 'ordinal';
-    if (customColumnTypes && customColumnTypes[header]) {
-        type = customColumnTypes[header];
-    } else {
-        if (!isNumericType) {
-            type = 'categorical';
-        } else if (uniqueCount <= CARDINALITY_THRESHOLD) {
-            type = 'categorical';
-        } else {
-            type = 'numerical';
+    let minVal: number | undefined = undefined;
+    let maxVal: number | undefined = undefined;
+    if (isNumericType && validValues.length > 0) {
+        const numValues = validValues.map(v => Number(v)).filter(v => !isNaN(v));
+        if (numValues.length > 0) {
+            minVal = Math.min(...numValues);
+            maxVal = Math.max(...numValues);
         }
     }
 
+    // Heuristic default detection
+    const detectedType: 'continuous' | 'categorical' | 'ordinal' = !isNumericType
+        ? 'categorical'
+        : uniqueCount <= CARDINALITY_THRESHOLD
+        ? 'categorical'
+        : 'continuous';
+
+    let type: 'continuous' | 'numerical' | 'categorical' | 'ordinal';
+    if (customColumnTypes && customColumnTypes[header]) {
+        const userT = customColumnTypes[header];
+        type = userT === 'numerical' ? 'continuous' : userT;
+    } else {
+        type = detectedType;
+    }
+
+    // Distinct sample values for UI preview
+    const sampleValues = Array.from(uniqueValues).slice(0, 5);
+
     metadata[header] = {
         type,
+        detectedType,
         uniqueCount,
         isHeuristicCategorical: isNumericType && (type === 'categorical' || type === 'ordinal'),
-        precision
+        precision,
+        sampleValues,
+        isNumeric: isNumericType,
+        min: minVal,
+        max: maxVal
     };
   }
   return metadata;
@@ -196,11 +218,11 @@ const getDescriptiveStats = (originalData: CsvData, augmentedData: CsvData, colu
 export const generateReport = (
     originalData: CsvData, 
     augmentedData: CsvData,
-    customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+    customColumnTypes?: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'>
 ): Report => {
   const columnMetadata = getDetailedColumnMetadata(originalData, customColumnTypes);
   const headers = Object.keys(columnMetadata);
-  const numericalColumns = headers.filter(k => columnMetadata[k].type === 'numerical');
+  const numericalColumns = headers.filter(k => columnMetadata[k].type === 'continuous' || columnMetadata[k].type === 'numerical');
   const categoricalColumns = headers.filter(k => columnMetadata[k].type === 'categorical' || columnMetadata[k].type === 'ordinal');
 
   const descriptiveStats = getDescriptiveStats(originalData, augmentedData, numericalColumns);
@@ -284,7 +306,7 @@ export const generateReport = (
     return { column: col, value: val, isSimilar: val < TVD_THRESHOLD };
   });
 
-  const colTypes: Record<string, 'numerical' | 'categorical' | 'ordinal'> = {};
+  const colTypes: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'> = {};
   headers.forEach(h => colTypes[h] = columnMetadata[h].type);
 
   return {
@@ -300,7 +322,9 @@ export const generateReport = (
         avgTVD: tvdResults.length > 0 ? tvdResults.reduce((s, r) => s + r.value, 0) / tvdResults.length : 0,
         avgCramersV: chiSquare.length > 0 ? chiSquare.reduce((s, r) => s + (r.cramersV || 0), 0) / chiSquare.length : 0,
         totalNumerical: numericalColumns.length,
+        totalContinuous: numericalColumns.length,
         totalCategorical: categoricalColumns.length,
+        totalOrdinal: headers.filter(k => columnMetadata[k].type === 'ordinal').length,
     }
   };
 };

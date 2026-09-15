@@ -21,10 +21,10 @@ const getPrecision = (values: (string | number)[]): number => {
 
 const getColumnTypes = (
   data: CsvData,
-  customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
-): Record<string, { type: 'numerical' | 'categorical' | 'ordinal', precision: number }> => {
+  customColumnTypes?: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'>
+): Record<string, { type: 'continuous' | 'numerical' | 'categorical' | 'ordinal', precision: number }> => {
   if (data.length === 0) return {};
-  const columnTypes: Record<string, { type: 'numerical' | 'categorical' | 'ordinal', precision: number }> = {};
+  const columnTypes: Record<string, { type: 'continuous' | 'numerical' | 'categorical' | 'ordinal', precision: number }> = {};
   const headers = Object.keys(data[0]);
 
   for (const header of headers) {
@@ -32,16 +32,16 @@ const getColumnTypes = (
     const uniqueValues = new Set(values);
     
     const isNumericType = values.length > 0 && values.slice(0, 50).every(val => 
-      val !== null && val !== undefined && !isNaN(Number(String(val).trim()))
+      val !== null && val !== undefined && String(val).trim() !== '' && !isNaN(Number(String(val).trim()))
     );
 
     const precision = isNumericType ? getPrecision(values) : 0;
 
-    let type: 'numerical' | 'categorical' | 'ordinal';
+    let type: 'continuous' | 'numerical' | 'categorical' | 'ordinal';
     if (customColumnTypes && customColumnTypes[header]) {
       type = customColumnTypes[header];
     } else {
-      type = (isNumericType && uniqueValues.size > 10) ? 'numerical' : 'categorical';
+      type = (isNumericType && uniqueValues.size > 10) ? 'continuous' : 'categorical';
     }
 
     columnTypes[header] = { type, precision };
@@ -53,8 +53,8 @@ const getColumnStats = (data: CsvData, numericalColumns: string[]) => {
     const stats: Record<string, { std: number; mean: number; min: number; max: number; isInteger: boolean }> = {};
     for (const col of numericalColumns) {
         const values = data
-            .map(row => row[col])
-            .filter(val => typeof val === 'number' && !isNaN(val)) as number[];
+            .map(row => Number(row[col]))
+            .filter(val => typeof val === 'number' && !isNaN(val));
         
         const isInteger = values.length > 0 && values.every(v => Number.isInteger(v));
         const min = values.length > 0 ? values.reduce((m, v) => v < m ? v : m, values[0]) : 0;
@@ -143,13 +143,13 @@ const predictCategoricalValue = (
 export const augmentData = (
   originalData: CsvData, 
   targetSize: number,
-  customColumnTypes?: Record<string, 'numerical' | 'categorical' | 'ordinal'>
+  customColumnTypes?: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'>
 ): CsvData => {
   if (originalData.length === 0) return [];
 
   const colInfo = getColumnTypes(originalData, customColumnTypes);
   const headers = Object.keys(originalData[0]);
-  const numericalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'numerical');
+  const numericalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'continuous' || colInfo[key].type === 'numerical');
   const categoricalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'categorical' || colInfo[key].type === 'ordinal');
   
   const stats = getColumnStats(originalData, numericalColumns);
@@ -168,11 +168,12 @@ export const augmentData = (
     // First pass: Numerical columns
     for (const col of numericalColumns) {
       const { std, mean } = stats[col];
-      let baseValue = baseSample[col];
+      let rawBase = baseSample[col];
+      let baseValue: number = typeof rawBase === 'number' ? rawBase : Number(rawBase);
       const precision = colInfo[col].precision;
       
       // Impute missing numerical values with the column mean
-      if (baseValue === null || baseValue === undefined || typeof baseValue !== 'number' || isNaN(baseValue)) {
+      if (baseValue === null || baseValue === undefined || isNaN(baseValue)) {
           baseValue = mean;
       }
       
