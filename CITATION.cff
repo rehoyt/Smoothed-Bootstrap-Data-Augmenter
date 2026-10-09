@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the associated paper."
+title: "Smoothed-Bootstrap TSTR / Privacy Evaluation"
+type: software
+authors:
+  - family-names: Hoyt
+    given-names: Robert
+    email: rehoyt@gmail.com
+  - family-names: Jagarapu
+    given-names: Jawahar
+  - family-names: Angelis
+    given-names: Dimitrios
+license: MIT
+preferred-citation:
+  type: article
+  title: "Tabular Medical Data Augmentation Using Smoothed Bootstrapping"
+  authors:
+    - family-names: Hoyt
+      given-names: Robert
+    - family-names: Jagarapu
+      given-names: Jawahar
+    - family-names: Angelis
+      given-names: Dimitrios
+  year: 2026
+  notes: "Update with journal, volume, pages, and DOI upon publication."
