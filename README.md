@@ -67,8 +67,6 @@ print(res.attrs["privacy"][["mia_auc", "dcr_ratio_median"]].mean())
 
 ## Notes
 
-- SMOTE and CTGAN/TVAE generators are included as optional comparators; the paper's
-  synthpop / Gaussian-copula comparison was run in a separate R/SDV pipeline.
 - The membership-inference result is an empirical attack, not a formal differential-privacy
   guarantee. Do not treat any output as safe to release without review, and do not run
   protected health information through a hosted deployment.
