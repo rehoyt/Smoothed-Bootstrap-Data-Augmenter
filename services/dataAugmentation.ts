@@ -71,73 +71,13 @@ const getColumnStats = (data: CsvData, numericalColumns: string[]) => {
     return stats;
 };
 
-const getNormalizedFeatureMatrix = (data: CsvData, numericalColumns: string[], stats: Record<string, { std: number; mean: number }>) => {
-    return data.map(row => {
-        const normalized: Record<string, number> = {};
-        numericalColumns.forEach(col => {
-            const val = row[col] as number;
-            const { mean, std } = stats[col];
-            normalized[col] = std > 0 && typeof val === 'number' ? (val - mean) / std : 0;
-        });
-        return normalized;
-    });
-};
-
-const weightedRandomChoice = (options: Map<any, number>): any => {
-    if (options.size === 0) return null;
-    const entries = Array.from(options.entries());
-    const totalWeight = entries.reduce((sum, [_, weight]) => sum + weight, 0);
-    if (totalWeight === 0) return entries[0][0];
-
-    let random = Math.random() * totalWeight;
-    for (const [value, weight] of entries) {
-        random -= weight;
-        if (random <= 0) return value;
-    }
-    return entries[0][0];
-};
-
-const predictCategoricalValue = (
-    syntheticNumericalFeatures: Record<string, number>,
-    originalNumericalMatrix: Record<string, number>[],
-    originalData: CsvData,
-    targetCol: string,
-    numericalColumns: string[],
-    categoricalColumns: string[],
-    stats: Record<string, { std: number; mean: number }>,
-    seedRow: any
-): string | number | null => {
-    const normalizedSynthetic: Record<string, number> = {};
-    numericalColumns.forEach(col => {
-        const { mean, std } = stats[col];
-        normalizedSynthetic[col] = std > 0 ? (syntheticNumericalFeatures[col] - mean) / std : 0;
-    });
-
-    const distances = originalNumericalMatrix.map((originalRow, idx) => {
-        let distSq = 0;
-        numericalColumns.forEach(col => {
-            distSq += Math.pow((normalizedSynthetic[col] || 0) - (originalRow[col] || 0), 2);
-        });
-
-        categoricalColumns.forEach(col => {
-            if (col !== targetCol && originalData[idx][col] !== seedRow[col]) {
-                distSq += CATEGORICAL_MISMATCH_PENALTY;
-            }
-        });
-
-        return { index: idx, dist: Math.sqrt(distSq) };
-    });
-
-    distances.sort((a, b) => a.dist - b.dist);
-    const neighbors = distances.slice(0, K_NEIGHBORS);
-
-    const classCounts = new Map<any, number>();
-    neighbors.forEach(n => {
-        const val = originalData[n.index][targetCol];
-        classCounts.set(val, (classCounts.get(val) || 0) + 1);
-    });
-
-    return weightedRandomChoice(classCounts);
+// Fast Box-Muller standard normal sampler N(0, 1)
+const sampleStandardNormal = (): number => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = Math.random();
+    while (v === 0) v = Math.random();
+    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 };
 
 export const augmentData = (
@@ -153,84 +93,187 @@ export const augmentData = (
   const categoricalColumns = Object.keys(colInfo).filter(key => colInfo[key].type === 'categorical' || colInfo[key].type === 'ordinal');
   
   const stats = getColumnStats(originalData, numericalColumns);
-  const normalizedOriginalMatrix = getNormalizedFeatureMatrix(originalData, numericalColumns, stats);
-  
-  const augmentedData: CsvData = [];
   const originalDataSize = originalData.length;
+  const numNum = numericalColumns.length;
+  const numCat = categoricalColumns.length;
+
+  // Precompute numerical column parameters for fast indexed access
+  const numMeans = new Float64Array(numNum);
+  const numStds = new Float64Array(numNum);
+  const numInvStds = new Float64Array(numNum);
+  const numMins = new Float64Array(numNum);
+  const numMaxs = new Float64Array(numNum);
+  const numFactors = new Float64Array(numNum);
+  const numIsInt = new Uint8Array(numNum);
+
+  for (let j = 0; j < numNum; j++) {
+      const col = numericalColumns[j];
+      const s = stats[col];
+      numMeans[j] = s.mean;
+      numStds[j] = s.std;
+      numInvStds[j] = s.std > 0 ? 1 / s.std : 0;
+      numMins[j] = s.min;
+      numMaxs[j] = s.max;
+      numFactors[j] = Math.pow(10, colInfo[col].precision);
+      numIsInt[j] = s.isInteger ? 1 : 0;
+  }
+
+  // Flat typed matrix of normalized numerical features: row * numNum + col
+  const normOrigMatrix = new Float64Array(originalDataSize * numNum);
+  const rawOrigNumMatrix = new Float64Array(originalDataSize * numNum);
+
+  for (let idx = 0; idx < originalDataSize; idx++) {
+      const row = originalData[idx];
+      const rowOffset = idx * numNum;
+      for (let j = 0; j < numNum; j++) {
+          const raw = row[numericalColumns[j]];
+          const val = (raw === null || raw === undefined || raw === '')
+              ? NaN
+              : (typeof raw === 'number' ? raw : Number(raw));
+          if (!isNaN(val)) {
+              rawOrigNumMatrix[rowOffset + j] = val;
+              normOrigMatrix[rowOffset + j] = numStds[j] > 0 ? (val - numMeans[j]) * numInvStds[j] : 0;
+          } else {
+              rawOrigNumMatrix[rowOffset + j] = numMeans[j];
+              normOrigMatrix[rowOffset + j] = 0;
+          }
+      }
+  }
+
+  // Integer-encode categorical columns into a flat Int32Array: row * numCat + col
+  const catMatrix = new Int32Array(originalDataSize * numCat);
+  const catDecoders: any[][] = new Array(numCat);
+
+  for (let c = 0; c < numCat; c++) {
+      const col = categoricalColumns[c];
+      const encoder = new Map<any, number>();
+      const decoder: any[] = [];
+      for (let idx = 0; idx < originalDataSize; idx++) {
+          const val = originalData[idx][col];
+          let code = encoder.get(val);
+          if (code === undefined) {
+              code = decoder.length;
+              encoder.set(val, code);
+              decoder.push(val);
+          }
+          catMatrix[idx * numCat + c] = code;
+      }
+      catDecoders[c] = decoder;
+  }
+
+  const useKNN = numCat > 0 && (numNum > 0 || numCat > 1);
+  const k = Math.min(K_NEIGHBORS, originalDataSize);
+
+  // Reusable scratch buffers to eliminate per-row heap allocations
+  const synthNorm = new Float64Array(numNum);
+  const baseDistSq = useKNN ? new Float64Array(originalDataSize) : null;
+  const topKDist = new Float64Array(k);
+  const topKIdx = new Int32Array(k);
+
+  const augmentedData: CsvData = new Array(targetSize);
 
   for (let i = 0; i < targetSize; i++) {
     const baseSampleIndex = Math.floor(Math.random() * originalDataSize);
     const baseSample = originalData[baseSampleIndex];
-    
+    const baseNumOffset = baseSampleIndex * numNum;
+    const baseCatOffset = baseSampleIndex * numCat;
+
     const syntheticRow: Record<string, any> = {};
-    const syntheticNumerical: Record<string, number> = {};
 
     // First pass: Numerical columns
-    for (const col of numericalColumns) {
-      const { std, mean } = stats[col];
-      let rawBase = baseSample[col];
-      let baseValue: number = typeof rawBase === 'number' ? rawBase : Number(rawBase);
-      const precision = colInfo[col].precision;
-      
-      // Impute missing numerical values with the column mean
-      if (baseValue === null || baseValue === undefined || isNaN(baseValue)) {
-          baseValue = mean;
-      }
-      
-      if (std > 0) {
-        const noise = jStat.normal.sample(0, std * NOISE_FACTOR);
-        let syntheticVal = (baseValue as number) + noise;
-        
-        // Clamp to original range to maintain biological plausibility
-        syntheticVal = Math.max(stats[col].min, Math.min(stats[col].max, syntheticVal));
+    for (let j = 0; j < numNum; j++) {
+      const col = numericalColumns[j];
+      const std = numStds[j];
+      const baseValue = rawOrigNumMatrix[baseNumOffset + j];
+      let finalVal = baseValue;
 
-        if (isNaN(syntheticVal)) {
-            syntheticNumerical[col] = baseValue as number;
-        } else {
-            if (stats[col].isInteger) {
-                // For purely discrete columns, maintain discreteness
-                syntheticNumerical[col] = Math.round(syntheticVal);
+      if (std > 0) {
+        const noise = sampleStandardNormal() * std * NOISE_FACTOR;
+        let syntheticVal = baseValue + noise;
+
+        // Clamp to original range to maintain biological plausibility
+        if (syntheticVal < numMins[j]) syntheticVal = numMins[j];
+        else if (syntheticVal > numMaxs[j]) syntheticVal = numMaxs[j];
+
+        if (!isNaN(syntheticVal)) {
+            if (numIsInt[j]) {
+                finalVal = Math.round(syntheticVal);
             } else {
-                // For continuous columns, maintain original precision
-                const factor = Math.pow(10, precision);
-                syntheticNumerical[col] = Math.round(syntheticVal * factor) / factor;
+                const factor = numFactors[j];
+                finalVal = Math.round(syntheticVal * factor) / factor;
             }
         }
-      } else {
-        syntheticNumerical[col] = baseValue as number;
       }
-      syntheticRow[col] = syntheticNumerical[col];
+
+      syntheticRow[col] = finalVal;
+      synthNorm[j] = std > 0 ? (finalVal - numMeans[j]) * numInvStds[j] : 0;
     }
 
-    // Second pass: Categorical columns
-    for (const col of categoricalColumns) {
-        if (numericalColumns.length > 0 || categoricalColumns.length > 1) {
-            syntheticRow[col] = predictCategoricalValue(
-                syntheticNumerical,
-                normalizedOriginalMatrix,
-                originalData,
-                col,
-                numericalColumns,
-                categoricalColumns,
-                stats,
-                baseSample
-            );
-        } else {
+    // Second pass: Categorical & Ordinal columns via shared-distance O(N) top-K k-NN
+    if (useKNN && baseDistSq) {
+        // Compute total distance squared (all numerical dims + all categorical dims) ONCE per synthetic row
+        for (let idx = 0; idx < originalDataSize; idx++) {
+            let dSq = 0;
+            const nOff = idx * numNum;
+            for (let j = 0; j < numNum; j++) {
+                const diff = synthNorm[j] - normOrigMatrix[nOff + j];
+                dSq += diff * diff;
+            }
+            const cOff = idx * numCat;
+            for (let c = 0; c < numCat; c++) {
+                if (catMatrix[cOff + c] !== catMatrix[baseCatOffset + c]) {
+                    dSq += CATEGORICAL_MISMATCH_PENALTY;
+                }
+            }
+            baseDistSq[idx] = dSq;
+        }
+
+        // For each target categorical column, exclude its own mismatch penalty and pick top-k neighbors
+        for (let c = 0; c < numCat; c++) {
+            const seedCode = catMatrix[baseCatOffset + c];
+            topKDist.fill(Infinity);
+            let worstDist = Infinity;
+
+            for (let idx = 0; idx < originalDataSize; idx++) {
+                let dSq = baseDistSq[idx];
+                if (catMatrix[idx * numCat + c] !== seedCode) {
+                    dSq -= CATEGORICAL_MISMATCH_PENALTY;
+                }
+
+                if (dSq < worstDist) {
+                    // Insertion into sorted top-k buffer (preserves lower index on ties)
+                    let pos = k - 1;
+                    while (pos > 0 && dSq < topKDist[pos - 1]) {
+                        topKDist[pos] = topKDist[pos - 1];
+                        topKIdx[pos] = topKIdx[pos - 1];
+                        pos--;
+                    }
+                    topKDist[pos] = dSq;
+                    topKIdx[pos] = idx;
+                    worstDist = topKDist[k - 1];
+                }
+            }
+
+            // Weighted random choice over the k nearest neighbors is equivalent to uniform pick among the k neighbors!
+            const pickedNeighborIdx = topKIdx[Math.floor(Math.random() * k)];
+            const pickedCode = catMatrix[pickedNeighborIdx * numCat + c];
+            syntheticRow[categoricalColumns[c]] = catDecoders[c][pickedCode];
+        }
+    } else {
+        for (let c = 0; c < numCat; c++) {
+            const col = categoricalColumns[c];
             syntheticRow[col] = baseSample[col];
         }
     }
 
     // Final pass: Construct row in original header order
     const orderedRow: Record<string, any> = {};
-    for (const header of headers) {
-        if (header in syntheticRow) {
-            orderedRow[header] = syntheticRow[header];
-        } else {
-            orderedRow[header] = baseSample[header];
-        }
+    for (let h = 0; h < headers.length; h++) {
+        const header = headers[h];
+        orderedRow[header] = header in syntheticRow ? syntheticRow[header] : baseSample[header];
     }
 
-    augmentedData.push(orderedRow);
+    augmentedData[i] = orderedRow;
   }
 
   return augmentedData;

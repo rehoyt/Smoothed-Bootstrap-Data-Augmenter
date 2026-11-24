@@ -7,99 +7,135 @@ const SIGNIFICANCE_LEVEL = 0.05;
 const TVD_THRESHOLD = 0.1;
 const CARDINALITY_THRESHOLD = 10;
 
-const getPrecision = (values: (string | number)[]): number => {
-    let maxPrecision = 0;
-    for (const val of values) {
-        if (val === null || val === undefined) continue;
-        const str = val.toString();
-        if (str.includes('.')) {
-            const precision = str.split('.')[1].length;
-            if (precision > maxPrecision) maxPrecision = precision;
-        }
-    }
-    return maxPrecision;
-};
-
 const calculateCramersV = (chiSq: number, n: number, categoriesCount: number): number => {
     if (n === 0 || categoriesCount <= 1) return 0;
     const v = Math.sqrt(chiSq / (n * (categoriesCount - 1)));
     return isNaN(v) ? 0 : v;
 };
 
-const calculateTVD = (origValues: any[], augValues: any[]): number => {
-    const origCounts: Record<string, number> = {};
-    origValues.forEach(v => {
-        const key = v === null || v === undefined ? 'null' : String(v);
-        origCounts[key] = (origCounts[key] || 0) + 1;
-    });
-    const augCounts: Record<string, number> = {};
-    augValues.forEach(v => {
-        const key = v === null || v === undefined ? 'null' : String(v);
-        augCounts[key] = (augCounts[key] || 0) + 1;
-    });
-
-    const allCats = new Set([...Object.keys(origCounts), ...Object.keys(augCounts)]);
+const calculateTVDFromCounts = (
+    origCounts: Record<string, number>,
+    nOrig: number,
+    augCounts: Record<string, number>,
+    nAug: number
+): number => {
+    const invOrig = 1 / (nOrig || 1);
+    const invAug = 1 / (nAug || 1);
     let sumDiff = 0;
-    const nOrig = origValues.length || 1;
-    const nAug = augValues.length || 1;
 
-    allCats.forEach(cat => {
-        const p = (origCounts[cat] || 0) / nOrig;
-        const q = (augCounts[cat] || 0) / nAug;
+    for (const cat in origCounts) {
+        const p = origCounts[cat] * invOrig;
+        const q = (augCounts[cat] || 0) * invAug;
         sumDiff += Math.abs(p - q);
-    });
+    }
+    for (const cat in augCounts) {
+        if (!(cat in origCounts)) {
+            sumDiff += augCounts[cat] * invAug;
+        }
+    }
 
     return sumDiff / 2;
 };
 
-const calculateMannWhitneyU = (arr1: number[], arr2: number[]): { U: number; p: number } => {
-    const n1 = arr1.length;
-    const n2 = arr2.length;
+// Zero-allocation O(n1 + n2) Mann-Whitney U on pre-sorted ascending arrays
+const calculateMannWhitneyUSorted = (s1: number[], s2: number[]): { U: number; p: number } => {
+    const n1 = s1.length;
+    const n2 = s2.length;
     if (n1 === 0 || n2 === 0) return { U: 0, p: 1 };
 
-    const combined = [
-        ...arr1.map(value => ({ value, group: 1 })),
-        ...arr2.map(value => ({ value, group: 2 }))
-    ].sort((a, b) => a.value - b.value);
-
-    let rank = 1;
-    const ranked = [];
     let i = 0;
-    while (i < combined.length) {
-        let j = i;
-        while (j < combined.length - 1 && combined[j].value === combined[j + 1].value) j++;
-        const avgRank = (rank + (rank + (j - i))) / 2;
-        for (let k = i; k <= j; k++) ranked.push({ ...combined[k], rank: avgRank });
-        rank += (j - i) + 1;
-        i = j + 1;
+    let j = 0;
+    let rank = 1;
+    let R1 = 0;
+
+    while (i < n1 || j < n2) {
+        const val = (i < n1 && j < n2)
+            ? (s1[i] <= s2[j] ? s1[i] : s2[j])
+            : (i < n1 ? s1[i] : s2[j]);
+
+        let c1 = 0;
+        while (i < n1 && s1[i] === val) {
+            i++;
+            c1++;
+        }
+        let c2 = 0;
+        while (j < n2 && s2[j] === val) {
+            j++;
+            c2++;
+        }
+
+        const totalTies = c1 + c2;
+        const avgRank = rank + (totalTies - 1) / 2;
+        if (c1 > 0) {
+            R1 += c1 * avgRank;
+        }
+        rank += totalTies;
     }
 
-    const R1 = ranked.filter(d => d.group === 1).reduce((sum, d) => sum + d.rank, 0);
     const U1 = R1 - (n1 * (n1 + 1)) / 2;
     const mu_U = (n1 * n2) / 2;
     const sigma_U = Math.sqrt((n1 * n2 * (n1 + n2 + 1)) / 12);
-    
+
     if (sigma_U === 0) return { U: U1, p: 1 };
     const z = (U1 - mu_U) / sigma_U;
     const p = 2 * (1 - jStat.normal.cdf(Math.abs(z), 0, 1));
     return { U: U1, p: isNaN(p) ? 1 : p };
 };
 
-const calculateKSTest = (arr1: number[], arr2: number[]): { D: number; p: number } => {
-    const n1 = arr1.length;
-    const n2 = arr2.length;
+// O(n1 + n2) two-pointer Kolmogorov-Smirnov test on pre-sorted ascending arrays
+const calculateKSTestSorted = (s1: number[], s2: number[]): { D: number; p: number } => {
+    const n1 = s1.length;
+    const n2 = s2.length;
     if (n1 === 0 || n2 === 0) return { D: 0, p: 1 };
 
-    const allValues = Array.from(new Set([...arr1, ...arr2])).sort((a, b) => a - b);
+    const inv1 = 1 / n1;
+    const inv2 = 1 / n2;
+    let i = 0;
+    let j = 0;
     let maxDiff = 0;
-    for (const val of allValues) {
-        const cdf1 = arr1.filter(v => v <= val).length / n1;
-        const cdf2 = arr2.filter(v => v <= val).length / n2;
-        maxDiff = Math.max(maxDiff, Math.abs(cdf1 - cdf2));
+
+    while (i < n1 || j < n2) {
+        const val = (i < n1 && j < n2)
+            ? (s1[i] <= s2[j] ? s1[i] : s2[j])
+            : (i < n1 ? s1[i] : s2[j]);
+
+        while (i < n1 && s1[i] <= val) i++;
+        while (j < n2 && s2[j] <= val) j++;
+
+        const diff = Math.abs(i * inv1 - j * inv2);
+        if (diff > maxDiff) maxDiff = diff;
     }
+
     const en = (n1 * n2) / (n1 + n2);
     const p = 2 * Math.exp(-2 * en * maxDiff * maxDiff);
     return { D: maxDiff, p: Math.min(isNaN(p) ? 1 : p, 1) };
+};
+
+const extractSortedNumbers = (data: CsvData, col: string): number[] => {
+    const out: number[] = [];
+    for (let i = 0; i < data.length; i++) {
+        const raw = data[i][col];
+        if (raw === null || raw === undefined || raw === '') continue;
+        const v = typeof raw === 'number' ? raw : Number(raw);
+        if (!isNaN(v)) out.push(v);
+    }
+    out.sort((a, b) => a - b);
+    return out;
+};
+
+const computeMeanAndSampleStd = (values: number[]): { mean: number; std: number } => {
+    const n = values.length;
+    if (n === 0) return { mean: 0, std: 0 };
+    let sum = 0;
+    for (let i = 0; i < n; i++) sum += values[i];
+    const mean = sum / n;
+    if (n < 2) return { mean, std: 0 };
+    let sqDiffSum = 0;
+    for (let i = 0; i < n; i++) {
+        const d = values[i] - mean;
+        sqDiffSum += d * d;
+    }
+    return { mean, std: Math.sqrt(sqDiffSum / (n - 1)) };
 };
 
 export const getDetailedColumnMetadata = (
@@ -109,34 +145,59 @@ export const getDetailedColumnMetadata = (
   if (data.length === 0) return {};
   const metadata: Record<string, ColumnMetadata> = {};
   const headers = Object.keys(data[0]);
-  
+  const rowCount = data.length;
+
   for (const header of headers) {
-    const rawValues = data.map(r => r[header]);
-    const validValues = rawValues.filter(v => v !== null && v !== undefined && String(v).trim() !== '');
-    const uniqueValues = new Set(validValues);
-    const uniqueCount = uniqueValues.size;
-    
-    let isNumericType = validValues.length > 0;
-    for (let i = 0; i < Math.min(validValues.length, 100); i++) {
-        const val = validValues[i];
-        const str = String(val).trim();
-        if (str === '' || isNaN(Number(str))) {
-            isNumericType = false;
-            break;
+    const uniqueValues = new Set<string | number>();
+    let validCount = 0;
+    let isNumericType = true;
+    let numericChecked = 0;
+    let maxPrecision = 0;
+    let minVal = Infinity;
+    let maxVal = -Infinity;
+    let hasNumeric = false;
+
+    for (let i = 0; i < rowCount; i++) {
+        const val = data[i][header];
+        if (val === null || val === undefined) continue;
+        if (typeof val === 'string' && val.trim() === '') continue;
+
+        validCount++;
+        uniqueValues.add(val);
+
+        if (isNumericType && numericChecked < 100) {
+            numericChecked++;
+            const num = typeof val === 'number' ? val : Number(String(val).trim());
+            if (isNaN(num)) {
+                isNumericType = false;
+            }
         }
     }
 
-    const precision = isNumericType ? getPrecision(validValues) : 0;
-    
-    let minVal: number | undefined = undefined;
-    let maxVal: number | undefined = undefined;
-    if (isNumericType && validValues.length > 0) {
-        const numValues = validValues.map(v => Number(v)).filter(v => !isNaN(v));
-        if (numValues.length > 0) {
-            minVal = Math.min(...numValues);
-            maxVal = Math.max(...numValues);
+    if (validCount === 0) isNumericType = false;
+
+    if (isNumericType) {
+        for (let i = 0; i < rowCount; i++) {
+            const val = data[i][header];
+            if (val === null || val === undefined) continue;
+            if (typeof val === 'string' && val.trim() === '') continue;
+            const num = typeof val === 'number' ? val : Number(val);
+            if (!isNaN(num)) {
+                hasNumeric = true;
+                if (num < minVal) minVal = num;
+                if (num > maxVal) maxVal = num;
+                const str = String(val);
+                const dotIdx = str.indexOf('.');
+                if (dotIdx !== -1) {
+                    const prec = str.length - dotIdx - 1;
+                    if (prec > maxPrecision) maxPrecision = prec;
+                }
+            }
         }
     }
+
+    const uniqueCount = uniqueValues.size;
+    const precision = isNumericType ? maxPrecision : 0;
 
     // Heuristic default detection
     const detectedType: 'continuous' | 'categorical' | 'ordinal' = !isNumericType
@@ -154,7 +215,11 @@ export const getDetailedColumnMetadata = (
     }
 
     // Distinct sample values for UI preview
-    const sampleValues = Array.from(uniqueValues).slice(0, 5);
+    const sampleValues: (string | number)[] = [];
+    for (const v of uniqueValues) {
+        sampleValues.push(v);
+        if (sampleValues.length >= 5) break;
+    }
 
     metadata[header] = {
         type,
@@ -164,55 +229,11 @@ export const getDetailedColumnMetadata = (
         precision,
         sampleValues,
         isNumeric: isNumericType,
-        min: minVal,
-        max: maxVal
+        min: hasNumeric ? minVal : undefined,
+        max: hasNumeric ? maxVal : undefined
     };
   }
   return metadata;
-};
-
-const getDescriptiveStats = (originalData: CsvData, augmentedData: CsvData, columns: string[]): DescriptiveStatReport[] => {
-    const reports: DescriptiveStatReport[] = [];
-    for (const col of columns) {
-        const originalValues = originalData.map(row => Number(row[col])).filter(v => typeof v === 'number' && !isNaN(v));
-        const augmentedValues = augmentedData.map(row => Number(row[col])).filter(v => typeof v === 'number' && !isNaN(v));
-        if (originalValues.length < 2 || augmentedValues.length < 2) continue;
-
-        const originalStats: Stats = {
-            mean: jStat.mean(originalValues),
-            std: jStat.stdev(originalValues, true),
-            min: jStat.min(originalValues),
-            max: jStat.max(originalValues),
-            count: originalValues.length,
-        };
-        const augmentedStats: Stats = {
-            mean: jStat.mean(augmentedValues),
-            std: jStat.stdev(augmentedValues, true),
-            min: jStat.min(augmentedValues),
-            max: jStat.max(augmentedValues),
-            count: augmentedValues.length,
-        };
-        
-        const n1 = originalStats.count;
-        const n2 = augmentedStats.count;
-        const s1 = originalStats.std;
-        const s2 = augmentedStats.std;
-        const diff = augmentedStats.mean - originalStats.mean;
-        const se = Math.sqrt((s1 * s1 / n1) + (s2 * s2 / n2));
-        const df_num = Math.pow((s1 * s1 / n1) + (s2 * s2 / n2), 2);
-        const df_den = (Math.pow(s1 * s1 / n1, 2) / (n1 - 1)) + (Math.pow(s2 * s2 / n2, 2) / (n2 - 1));
-        const df = df_den > 0 ? df_num / df_den : 0;
-        const t_crit = df > 0 ? jStat.studentt.inv(1 - 0.025, df) : 1.96;
-        const marginOfError = t_crit * se;
-
-        reports.push({
-            column: col,
-            original: originalStats,
-            augmented: augmentedStats,
-            meanDifferenceCI: { diff, lower: diff - marginOfError, upper: diff + marginOfError },
-        });
-    }
-    return reports;
 };
 
 export const generateReport = (
@@ -225,86 +246,147 @@ export const generateReport = (
   const numericalColumns = headers.filter(k => columnMetadata[k].type === 'continuous' || columnMetadata[k].type === 'numerical');
   const categoricalColumns = headers.filter(k => columnMetadata[k].type === 'categorical' || columnMetadata[k].type === 'ordinal');
 
-  const descriptiveStats = getDescriptiveStats(originalData, augmentedData, numericalColumns);
-  
-  const tTest = numericalColumns.map(col => {
-      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      if (orig.length < 2 || aug.length < 1) return { column: col, statistic: 0, pValue: 1, isSimilar: true };
-      
-      const augMean = jStat.mean(aug);
-      let p = jStat.ttest(augMean, orig);
-      if (isNaN(p)) p = 1;
+  const descriptiveStats: DescriptiveStatReport[] = [];
+  const tTest: StatisticalTestResult[] = [];
+  const mannWhitney: StatisticalTestResult[] = [];
+  const ksTest: StatisticalTestResult[] = [];
 
-      return { 
-          column: col, 
-          statistic: jStat.tscore(augMean, orig), 
-          pValue: p, 
-          isSimilar: p > SIGNIFICANCE_LEVEL,
-          uniqueCount: columnMetadata[col].uniqueCount
-      };
-  });
+  for (const col of numericalColumns) {
+      const orig = extractSortedNumbers(originalData, col);
+      const aug = extractSortedNumbers(augmentedData, col);
+      const uniqueCount = columnMetadata[col].uniqueCount;
 
-  const mannWhitney = numericalColumns.map(col => {
-      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      const res = calculateMannWhitneyU(orig, aug);
-      return { 
-          column: col, 
-          statistic: res.U, 
-          pValue: res.p, 
-          isSimilar: res.p > SIGNIFICANCE_LEVEL,
-          uniqueCount: columnMetadata[col].uniqueCount
-      };
-  });
+      const origBasic = computeMeanAndSampleStd(orig);
+      const augBasic = computeMeanAndSampleStd(aug);
 
-  const ksTest = numericalColumns.map(col => {
-      const orig = originalData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      const aug = augmentedData.map(r => Number(r[col])).filter(v => typeof v === 'number' && !isNaN(v));
-      const res = calculateKSTest(orig, aug);
-      return { 
-          column: col, 
-          statistic: res.D, 
-          pValue: res.p, 
-          isSimilar: res.p > SIGNIFICANCE_LEVEL,
-          uniqueCount: columnMetadata[col].uniqueCount
-      };
-  });
+      // Descriptive stats & 95% CI
+      if (orig.length >= 2 && aug.length >= 2) {
+          const originalStats: Stats = {
+              mean: origBasic.mean,
+              std: origBasic.std,
+              min: orig[0],
+              max: orig[orig.length - 1],
+              count: orig.length,
+          };
+          const augmentedStats: Stats = {
+              mean: augBasic.mean,
+              std: augBasic.std,
+              min: aug[0],
+              max: aug[aug.length - 1],
+              count: aug.length,
+          };
 
-  const chiSquare = categoricalColumns.map(col => {
+          const n1 = originalStats.count;
+          const n2 = augmentedStats.count;
+          const s1 = originalStats.std;
+          const s2 = augmentedStats.std;
+          const diff = augmentedStats.mean - originalStats.mean;
+          const v1 = (s1 * s1) / n1;
+          const v2 = (s2 * s2) / n2;
+          const se = Math.sqrt(v1 + v2);
+          const df_num = Math.pow(v1 + v2, 2);
+          const df_den = (v1 * v1) / (n1 - 1) + (v2 * v2) / (n2 - 1);
+          const df = df_den > 0 ? df_num / df_den : 0;
+          const t_crit = df > 0 ? jStat.studentt.inv(1 - 0.025, df) : 1.96;
+          const marginOfError = t_crit * se;
+
+          descriptiveStats.push({
+              column: col,
+              original: originalStats,
+              augmented: augmentedStats,
+              meanDifferenceCI: { diff, lower: diff - marginOfError, upper: diff + marginOfError },
+          });
+      }
+
+      // One-sample t-test (matching original jStat.ttest(augMean, orig) / jStat.tscore(augMean, orig))
+      if (orig.length < 2 || aug.length < 1) {
+          tTest.push({ column: col, statistic: 0, pValue: 1, isSimilar: true, uniqueCount });
+      } else {
+          const seOrig = origBasic.std / Math.sqrt(orig.length);
+          const tStat = seOrig > 0 ? (augBasic.mean - origBasic.mean) / seOrig : 0;
+          let p = seOrig > 0 ? jStat.ttest(tStat, orig.length, 2) : 1;
+          if (isNaN(p)) p = 1;
+          const safeStat = isNaN(tStat) || !isFinite(tStat) ? 0 : tStat;
+
+          tTest.push({
+              column: col,
+              statistic: safeStat,
+              pValue: p,
+              isSimilar: p > SIGNIFICANCE_LEVEL,
+              uniqueCount,
+          });
+      }
+
+      // Mann-Whitney U test (reusing sorted arrays)
+      const mwRes = calculateMannWhitneyUSorted(orig, aug);
+      mannWhitney.push({
+          column: col,
+          statistic: mwRes.U,
+          pValue: mwRes.p,
+          isSimilar: mwRes.p > SIGNIFICANCE_LEVEL,
+          uniqueCount,
+      });
+
+      // Kolmogorov-Smirnov test (reusing sorted arrays)
+      const ksRes = calculateKSTestSorted(orig, aug);
+      ksTest.push({
+          column: col,
+          statistic: ksRes.D,
+          pValue: ksRes.p,
+          isSimilar: ksRes.p > SIGNIFICANCE_LEVEL,
+          uniqueCount,
+      });
+  }
+
+  const chiSquare: StatisticalTestResult[] = [];
+  const tvdResults: { column: string; value: number; isSimilar: boolean }[] = [];
+  const origLen = originalData.length;
+  const augLen = augmentedData.length;
+
+  for (const col of categoricalColumns) {
       const origCounts: Record<string, number> = {};
-      originalData.forEach(r => {
-          const key = r[col] === null || r[col] === undefined ? 'null' : String(r[col]);
+      for (let i = 0; i < origLen; i++) {
+          const raw = originalData[i][col];
+          const key = raw === null || raw === undefined ? 'null' : String(raw);
           origCounts[key] = (origCounts[key] || 0) + 1;
-      });
-      const augCounts: Record<string, number> = {};
-      augmentedData.forEach(r => {
-          const key = r[col] === null || r[col] === undefined ? 'null' : String(r[col]);
-          augCounts[key] = (augCounts[key] || 0) + 1;
-      });
-      
-      const cats = Object.keys(origCounts);
-      if (cats.length < 2) return null;
-      const observed = cats.map(c => augCounts[c] || 0);
-      const expected = cats.map(c => (origCounts[c] / originalData.length) * augmentedData.length);
-      const stat = observed.reduce((sum, obs, i) => sum + (expected[i] > 0 ? Math.pow(obs - expected[i], 2) / expected[i] : 0), 0);
-      let p = 1 - jStat.chisquare.cdf(stat, cats.length - 1);
-      if (isNaN(p)) p = 1;
-      const v = calculateCramersV(stat, augmentedData.length, cats.length);
-      return { 
-          column: col, 
-          statistic: stat, 
-          pValue: p, 
-          cramersV: v, 
-          isSimilar: p > SIGNIFICANCE_LEVEL,
-          uniqueCount: columnMetadata[col].uniqueCount
-      };
-  }).filter(r => r !== null) as StatisticalTestResult[];
+      }
 
-  const tvdResults = categoricalColumns.map(col => {
-    const val = calculateTVD(originalData.map(r => r[col]), augmentedData.map(r => r[col]));
-    return { column: col, value: val, isSimilar: val < TVD_THRESHOLD };
-  });
+      const augCounts: Record<string, number> = {};
+      for (let i = 0; i < augLen; i++) {
+          const raw = augmentedData[i][col];
+          const key = raw === null || raw === undefined ? 'null' : String(raw);
+          augCounts[key] = (augCounts[key] || 0) + 1;
+      }
+
+      const tvdVal = calculateTVDFromCounts(origCounts, origLen, augCounts, augLen);
+      tvdResults.push({ column: col, value: tvdVal, isSimilar: tvdVal < TVD_THRESHOLD });
+
+      const cats = Object.keys(origCounts);
+      if (cats.length >= 2 && origLen > 0 && augLen > 0) {
+          let stat = 0;
+          const scale = augLen / origLen;
+          for (let c = 0; c < cats.length; c++) {
+              const cat = cats[c];
+              const obs = augCounts[cat] || 0;
+              const exp = origCounts[cat] * scale;
+              if (exp > 0) {
+                  const diff = obs - exp;
+                  stat += (diff * diff) / exp;
+              }
+          }
+          let p = 1 - jStat.chisquare.cdf(stat, cats.length - 1);
+          if (isNaN(p)) p = 1;
+          const v = calculateCramersV(stat, augLen, cats.length);
+          chiSquare.push({
+              column: col,
+              statistic: stat,
+              pValue: p,
+              cramersV: v,
+              isSimilar: p > SIGNIFICANCE_LEVEL,
+              uniqueCount: columnMetadata[col].uniqueCount,
+          });
+      }
+  }
 
   const colTypes: Record<string, 'continuous' | 'numerical' | 'categorical' | 'ordinal'> = {};
   headers.forEach(h => colTypes[h] = columnMetadata[h].type);

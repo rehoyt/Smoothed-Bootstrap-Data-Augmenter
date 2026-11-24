@@ -124,23 +124,34 @@ const App: React.FC = () => {
         setChatMessages([]);
     }, []);
 
-    const handleColumnTypeChange = useCallback((columnName: string, newType: 'continuous' | 'categorical' | 'ordinal') => {
-        setCustomColumnTypes(prev => {
-            const next = { ...prev, [columnName]: newType };
-            if (originalData) {
-                try {
-                    if (augmentedData) {
-                        const newAug = augmentData(originalData, targetSize, next);
-                        setAugmentedData(newAug);
-                        setReport(generateReport(originalData, newAug, next));
-                    }
-                } catch (e) {
-                    console.error("Error updating augmented data with new column types:", e);
-                }
+    const runSynthesis = useCallback((
+        data: CsvData,
+        size: number,
+        types: Record<string, 'continuous' | 'categorical' | 'ordinal'>
+    ) => {
+        setIsLoading(true);
+        setError('');
+        setTimeout(() => {
+            try {
+                const augmented = augmentData(data, size, types);
+                const nextReport = generateReport(data, augmented, types);
+                setAugmentedData(augmented);
+                setReport(nextReport);
+            } catch (e) {
+                setError(e instanceof Error ? e.message : 'Error during augmentation.');
+            } finally {
+                setIsLoading(false);
             }
-            return next;
-        });
-    }, [originalData, augmentedData, targetSize]);
+        }, 16);
+    }, []);
+
+    const handleColumnTypeChange = useCallback((columnName: string, newType: 'continuous' | 'categorical' | 'ordinal') => {
+        const nextTypes = { ...customColumnTypes, [columnName]: newType };
+        setCustomColumnTypes(nextTypes);
+        if (originalData && augmentedData) {
+            runSynthesis(originalData, targetSize, nextTypes);
+        }
+    }, [customColumnTypes, originalData, augmentedData, targetSize, runSynthesis]);
 
     const handleResetColumnTypes = useCallback(() => {
         if (!originalData) return;
@@ -152,25 +163,16 @@ const App: React.FC = () => {
         });
         setCustomColumnTypes(initialTypes);
         if (augmentedData) {
-            const newAug = augmentData(originalData, targetSize, initialTypes);
-            setAugmentedData(newAug);
-            setReport(generateReport(originalData, newAug, initialTypes));
+            runSynthesis(originalData, targetSize, initialTypes);
         }
-    }, [originalData, augmentedData, targetSize]);
+    }, [originalData, augmentedData, targetSize, runSynthesis]);
 
     const handleAugmentData = useCallback(() => {
         if (!originalData) return;
-        setIsLoading(true); setError(''); setReport(null); setAugmentedData(null);
-        setTimeout(() => {
-            try {
-                const augmented = augmentData(originalData, targetSize, customColumnTypes);
-                setAugmentedData(augmented);
-                setReport(generateReport(originalData, augmented, customColumnTypes));
-            } catch (e) {
-                setError(e instanceof Error ? e.message : 'Error during augmentation.');
-            } finally { setIsLoading(false); }
-        }, 50);
-    }, [originalData, targetSize, customColumnTypes]);
+        setReport(null);
+        setAugmentedData(null);
+        runSynthesis(originalData, targetSize, customColumnTypes);
+    }, [originalData, targetSize, customColumnTypes, runSynthesis]);
 
     const handleDownload = () => {
         if (!augmentedData) return;
@@ -371,7 +373,25 @@ const ControlsSection: React.FC<any> = ({
     customColumnTypes,
     onColumnTypeChange,
     onResetColumnTypes
-}) => (
+}) => {
+    const columnUniqueCounts = useMemo(() => {
+        const counts: Record<string, number> = {};
+        if (!originalData || originalData.length === 0) return counts;
+        const cols = Object.keys(originalData[0] || {});
+        for (const col of cols) {
+            const set = new Set<string | number>();
+            for (let i = 0; i < originalData.length; i++) {
+                const v = originalData[i][col];
+                if (v !== null && v !== undefined && (typeof v !== 'string' || v.trim() !== '')) {
+                    set.add(v);
+                }
+            }
+            counts[col] = set.size;
+        }
+        return counts;
+    }, [originalData]);
+
+    return (
     <div className="space-y-8">
         <section>
             <div className="flex items-center gap-3 mb-6">
@@ -437,8 +457,7 @@ const ControlsSection: React.FC<any> = ({
                         {Object.keys(originalData[0] || {}).map((col) => {
                             const rawType = customColumnTypes[col] || 'continuous';
                             const currentType = (rawType === 'numerical' ? 'continuous' : rawType) as 'continuous' | 'categorical' | 'ordinal';
-                            const values = originalData.map(r => r[col]).filter(v => v !== null && v !== undefined && String(v).trim() !== '');
-                            const uniqCount = new Set(values).size;
+                            const uniqCount = columnUniqueCounts[col] || 0;
                             
                             return (
                                 <div key={col} className="p-2.5 bg-white rounded-xl border border-slate-100 shadow-2xs flex items-center justify-between gap-3 hover:border-blue-200 transition-all">
@@ -539,7 +558,8 @@ const ControlsSection: React.FC<any> = ({
             )}
         </div>
     </div>
-);
+    );
+};
 
 const ReportDisplay: React.FC<any> = ({ 
     report, 
@@ -899,87 +919,152 @@ const DescriptiveStatsTable: React.FC<any> = ({ data, report }) => (
 
 const HistogramDisplay: React.FC<any> = ({ report, originalData, augmentedData }) => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-8">
-        {Object.keys(report.columnMetadata || {}).map((colName) => (
-            <Histogram 
-                key={colName} 
-                title={colName} 
-                isNumerical={report.columnMetadata[colName]?.type === 'numerical' && !report.columnMetadata[colName]?.isHeuristicCategorical}
-                originalData={originalData.map((r: any) => r[colName])} 
-                augmentedData={augmentedData.map((r: any) => r[colName])} 
-            />
-        ))}
+        {Object.keys(report.columnMetadata || {}).map((colName) => {
+            const meta = report.columnMetadata[colName];
+            const isNumerical = (meta?.type === 'continuous' || meta?.type === 'numerical') && !meta?.isHeuristicCategorical;
+            return (
+                <Histogram 
+                    key={colName} 
+                    title={colName} 
+                    colName={colName}
+                    isNumerical={isNumerical}
+                    originalRows={originalData} 
+                    augmentedRows={augmentedData} 
+                />
+            );
+        })}
     </div>
 );
 
-const Histogram: React.FC<any> = ({ originalData, augmentedData, title, isNumerical }) => {
-    const cleanOrig = originalData.filter((v: any) => v !== null && v !== undefined);
-    const cleanAug = augmentedData.filter((v: any) => v !== null && v !== undefined);
-    
-    if (cleanOrig.length === 0 && cleanAug.length === 0) return null;
+const Histogram: React.FC<any> = ({ originalRows, augmentedRows, colName, title, isNumerical }) => {
+    const { counts, minLabel, maxLabel, maxH, isEmpty } = useMemo(() => {
+        const cleanOrig: any[] = [];
+        for (let i = 0; i < originalRows.length; i++) {
+            const v = originalRows[i][colName];
+            if (v !== null && v !== undefined) cleanOrig.push(v);
+        }
+        const cleanAug: any[] = [];
+        for (let i = 0; i < augmentedRows.length; i++) {
+            const v = augmentedRows[i][colName];
+            if (v !== null && v !== undefined) cleanAug.push(v);
+        }
 
-    let counts: { label: string; o: number; a: number }[] = [];
-    let minLabel = '';
-    let maxLabel = '';
+        if (cleanOrig.length === 0 && cleanAug.length === 0) {
+            return { counts: [], minLabel: '', maxLabel: '', maxH: 0.001, isEmpty: true };
+        }
 
-    if (isNumerical) {
-        const bins = 15;
-        const allNumeric = [...cleanOrig, ...cleanAug].map(Number).filter(v => typeof v === 'number' && !isNaN(v));
-        if (allNumeric.length === 0) return null;
+        let computedCounts: { label: string; o: number; a: number }[] = [];
+        let minLbl = '';
+        let maxLbl = '';
 
-        const min = Math.min(...allNumeric);
-        const max = Math.max(...allNumeric);
-        const range = max - min;
-        const step = range === 0 ? 1 : range / bins;
+        if (isNumerical) {
+            const bins = 15;
+            const origNums: number[] = [];
+            const augNums: number[] = [];
+            let min = Infinity;
+            let max = -Infinity;
 
-        counts = Array.from({ length: bins }, (_, i) => {
-            const binMin = min + i * step;
-            const binMax = i === bins - 1 ? max + 0.0001 : min + (i + 1) * step;
-            const originalInBin = cleanOrig.filter((v: any) => {
-                const num = Number(v);
-                return !isNaN(num) && num >= binMin && num < binMax;
-            }).length;
-            const augmentedInBin = cleanAug.filter((v: any) => {
-                const num = Number(v);
-                return !isNaN(num) && num >= binMin && num < binMax;
-            }).length;
-            
-            return {
-                label: `${binMin.toFixed(1)}-${binMax.toFixed(1)}`,
-                o: originalInBin / (cleanOrig.length || 1),
-                a: augmentedInBin / (cleanAug.length || 1)
-            };
-        });
-        minLabel = min.toFixed(1);
-        maxLabel = max.toFixed(1);
-    } else {
-        // Categorical or discrete discrete variables: find unique values from original and augmented
-        const uniqueVals = Array.from(new Set([...cleanOrig, ...cleanAug])).map(v => String(v).trim());
-        
-        // Sort unique values nicely
-        uniqueVals.sort((a, b) => {
-            const numA = Number(a);
-            const numB = Number(b);
-            if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-            return a.localeCompare(b);
-        });
+            for (let i = 0; i < cleanOrig.length; i++) {
+                const num = typeof cleanOrig[i] === 'number' ? cleanOrig[i] : Number(cleanOrig[i]);
+                if (!isNaN(num)) {
+                    origNums.push(num);
+                    if (num < min) min = num;
+                    if (num > max) max = num;
+                }
+            }
+            for (let i = 0; i < cleanAug.length; i++) {
+                const num = typeof cleanAug[i] === 'number' ? cleanAug[i] : Number(cleanAug[i]);
+                if (!isNaN(num)) {
+                    augNums.push(num);
+                    if (num < min) min = num;
+                    if (num > max) max = num;
+                }
+            }
 
-        // Limit to top 15 categories to avoid visual clutter
-        const topVals = uniqueVals.slice(0, 15);
+            if (origNums.length === 0 && augNums.length === 0) {
+                return { counts: [], minLabel: '', maxLabel: '', maxH: 0.001, isEmpty: true };
+            }
 
-        counts = topVals.map(val => {
-            const oCount = cleanOrig.filter((v: any) => String(v).trim() === val).length;
-            const aCount = cleanAug.filter((v: any) => String(v).trim() === val).length;
-            return {
+            const range = max - min;
+            const step = range === 0 ? 1 : range / bins;
+            const invStep = 1 / step;
+            const origBinCounts = new Int32Array(bins);
+            const augBinCounts = new Int32Array(bins);
+
+            for (let i = 0; i < origNums.length; i++) {
+                let idx = range === 0 ? 0 : Math.floor((origNums[i] - min) * invStep);
+                if (idx >= bins) idx = bins - 1;
+                else if (idx < 0) idx = 0;
+                origBinCounts[idx]++;
+            }
+            for (let i = 0; i < augNums.length; i++) {
+                let idx = range === 0 ? 0 : Math.floor((augNums[i] - min) * invStep);
+                if (idx >= bins) idx = bins - 1;
+                else if (idx < 0) idx = 0;
+                augBinCounts[idx]++;
+            }
+
+            const origDenom = origNums.length || 1;
+            const augDenom = augNums.length || 1;
+
+            computedCounts = Array.from({ length: bins }, (_, i) => {
+                const binMin = min + i * step;
+                const binMax = i === bins - 1 ? max : min + (i + 1) * step;
+                return {
+                    label: `${binMin.toFixed(1)}-${binMax.toFixed(1)}`,
+                    o: origBinCounts[i] / origDenom,
+                    a: augBinCounts[i] / augDenom,
+                };
+            });
+            minLbl = min.toFixed(1);
+            maxLbl = max.toFixed(1);
+        } else {
+            const origMap = new Map<string, number>();
+            const augMap = new Map<string, number>();
+            const uniqueSet = new Set<string>();
+
+            for (let i = 0; i < cleanOrig.length; i++) {
+                const key = String(cleanOrig[i]).trim();
+                uniqueSet.add(key);
+                origMap.set(key, (origMap.get(key) || 0) + 1);
+            }
+            for (let i = 0; i < cleanAug.length; i++) {
+                const key = String(cleanAug[i]).trim();
+                uniqueSet.add(key);
+                augMap.set(key, (augMap.get(key) || 0) + 1);
+            }
+
+            const uniqueVals = Array.from(uniqueSet);
+            uniqueVals.sort((a, b) => {
+                const numA = Number(a);
+                const numB = Number(b);
+                if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+                return a.localeCompare(b);
+            });
+
+            const topVals = uniqueVals.slice(0, 15);
+            const origDenom = cleanOrig.length || 1;
+            const augDenom = cleanAug.length || 1;
+
+            computedCounts = topVals.map(val => ({
                 label: val,
-                o: oCount / (cleanOrig.length || 1),
-                a: aCount / (cleanAug.length || 1)
-            };
-        });
-        minLabel = topVals[0] || '';
-        maxLabel = topVals[topVals.length - 1] || '';
-    }
+                o: (origMap.get(val) || 0) / origDenom,
+                a: (augMap.get(val) || 0) / augDenom,
+            }));
+            minLbl = topVals[0] || '';
+            maxLbl = topVals[topVals.length - 1] || '';
+        }
 
-    const maxH = Math.max(...counts.map(c => Math.max(c.o, c.a)), 0.001);
+        let peak = 0.001;
+        for (let i = 0; i < computedCounts.length; i++) {
+            if (computedCounts[i].o > peak) peak = computedCounts[i].o;
+            if (computedCounts[i].a > peak) peak = computedCounts[i].a;
+        }
+
+        return { counts: computedCounts, minLabel: minLbl, maxLabel: maxLbl, maxH: peak, isEmpty: false };
+    }, [originalRows, augmentedRows, colName, isNumerical]);
+
+    if (isEmpty) return null;
 
     return (
         <div className="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between min-h-[300px]">
